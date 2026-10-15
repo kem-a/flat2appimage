@@ -48,8 +48,9 @@ usage() {
 
 	Build AppImage variants from a Flathub manifest, inside a container.
 	The manifest may be a local path or an http(s) URL (GitHub blob URLs are
-	converted to raw automatically); URL downloads are cached in
-	~/.cache/flat2appimage/manifests/.
+	converted to raw automatically; for GitHub the sibling files of the
+	manifest, like cargo-sources.json, are fetched too). Downloads are cached
+	in ~/.cache/flat2appimage/manifests/.
 
 	Options:
 	  --variant all|squashfs|anylinux  build both (default) or one variant
@@ -153,7 +154,8 @@ fi
 
 [[ -n "$ARCH" ]] || ARCH="$(uname -m)"
 
-# the manifest may be a URL; convert GitHub blob URLs to raw and download
+# the manifest may be a URL; convert GitHub blob URLs to raw, download the
+# manifest plus its sibling files (cargo-sources.json, patches, ...)
 case "$MANIFEST" in
 	http://*|https://*)
 		if [[ "$MANIFEST" = https://github.com/*/blob/* ]]; then
@@ -168,12 +170,37 @@ case "$MANIFEST" in
 		mkdir -p "$mdir"
 		log "downloading manifest $MANIFEST"
 		wget -qO "$mdir/$mname" "$MANIFEST" || { rm -f "$mdir/$mname"; die "manifest download failed"; }
+		case "$MANIFEST" in
+			https://raw.githubusercontent.com/*)
+				r="${MANIFEST#https://raw.githubusercontent.com/}"
+				owner="${r%%/*}"; r="${r#*/}"
+				repo="${r%%/*}"; r="${r#*/}"
+				ref="${r%%/*}"; rpath="${r#*/}"
+				rdir="${rpath%/*}"; [[ "$rdir" = "$rpath" ]] && rdir=""
+				log "  fetching repo files ($owner/$repo @ $ref)"
+				tmp="$(mktemp -d)"
+				if wget -qO "$tmp/repo.tar.gz" "https://github.com/$owner/$repo/archive/$ref.tar.gz"; then
+					tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
+					top="$(tar -tzf "$tmp/repo.tar.gz" | head -n 1 | cut -d/ -f1)"
+					src="$tmp/$top"
+					[[ -n "$rdir" ]] && src="$src/$rdir"
+					if [[ -d "$src" ]]; then
+						cp -a "$src/." "$mdir/"
+					else
+						warn "directory '$rdir' not found in repo archive, manifest only"
+					fi
+				else
+					warn "could not fetch repo archive, sibling source files may be missing"
+				fi
+				rm -rf "$tmp"
+				;;
+		esac
 		MANIFEST="$mdir/$mname"
 		;;
 esac
 
-MANIFEST="$(realpath "$MANIFEST")"
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+MANIFEST="$(realpath "$MANIFEST")"
 APP_DIR="$(dirname "$MANIFEST")"
 
 if [[ -z "$APP_ID" ]]; then

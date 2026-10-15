@@ -27,8 +27,9 @@ A local manifest file works too:
 ./flat2appimage path/to/io.github.tobagin.karere.yml
 ```
 
-GitHub `blob` URLs are converted to raw automatically. The manifest is cached in
-`~/.cache/flat2appimage/manifests/<app>/`.
+GitHub `blob` URLs are converted to raw automatically. For GitHub URLs the whole manifest
+directory is fetched (many apps need sibling files like `cargo-sources.json` or patches) and
+cached in `~/.cache/flat2appimage/manifests/<app>/`.
 
 Artifacts land in `dist/`:
 
@@ -103,14 +104,12 @@ flat2appimage                # the tool (bash)
 README.md                    # this file
 docs/flat2appimage-plan.md   # design, decisions, status, findings
 scripts/                     # AppManager build scripts, copied as reference
-io.github.tobagin.karere/    # optional local test manifest (Rust + CEF)
-com.github.tchx84.Flatseal/  # optional local test manifest (gjs + meson)
 dist/                        # build output (gitignored)
 ```
 
-Manifests normally come from a URL. A local manifest directory can hold the manifest and an
-optional `flat2appimage.conf`; for URL builds the manifest is cached and the conf is looked up in
-`~/.cache/flat2appimage/manifests/<app>/`.
+Manifests come from a URL (cached under `~/.cache/flat2appimage/manifests/<app>/`, together with the
+rest of the manifest directory) or from a local path. A per-app `flat2appimage.conf` goes next to the
+manifest.
 
 ## License
 

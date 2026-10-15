@@ -15,9 +15,10 @@ Implemented and verified:
 - One command builds both variants plus `.zsync` files, fully in a container:
   - `io.github.tobagin.karere` (Rust + CEF, yml manifest, ELF binary): both variants smoke tested.
   - `com.github.tchx84.Flatseal` (gjs + meson, JSON manifest, script launcher): both variants smoke tested.
-- Manifest can be a local file or an http(s) URL. GitHub blob URLs are converted to raw, downloads are
-  cached under `~/.cache/flat2appimage/manifests/<app>/` (that directory doubles as the app dir, so a
-  per-app `flat2appimage.conf` can live there too).
+- Manifest can be a local file or an http(s) URL. GitHub blob URLs are converted to raw; for GitHub
+  the whole manifest directory is fetched from the repo archive (sibling files like cargo-sources.json
+  or patches matter). Downloads are cached under `~/.cache/flat2appimage/manifests/<app>/` (that
+  directory doubles as the app dir, so a per-app `flat2appimage.conf` can live there too).
 - Container bootstrap (toolbox auto-create + dependency install, podman fallback), caches reused across builds.
 - Manifest introspection: command, version (first git tag), finish-args envs, desktop file, icon, name.
 - squashfs variant: AppDir assembly, generated AppRun, optional update info, zsync.
@@ -238,9 +239,6 @@ scripts/                     # AppManager scripts, copied as reference
   make-appimage.sh           # template for the squashfs variant
   make-anyimage.sh           # template for the anylinux variant (container bootstrap, UPINFO)
   fetch-*.sh, build-unsquashfs.sh   # AppManager runtime tools, unused here
-io.github.tobagin.karere/    # first target (yml manifest, Rust + CEF)
-com.github.tchx84.Flatseal/  # second target (JSON manifest, gjs + meson)
-  (both app dirs: manifest + optional flat2appimage.conf)
 docs/flat2appimage-plan.md   # this file
 dist/                        # build output (gitignored)
 ```
