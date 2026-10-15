@@ -10,4 +10,5 @@ appimagetool
 .directory
 .c[a-z]*/
 *.log
+docs/
 .flatpak-builder/
