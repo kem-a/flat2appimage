@@ -128,7 +128,7 @@ flowchart LR
 
 ### Phase 0: arguments + container re-exec
 
-```
+```sh
 flat2appimage [--variant all|squashfs|anylinux] [--arch ARCH] [--dist DIR]
               [--update-info VALUE] [--keep] [--debug]
               [--container NAME] [--engine toolbox|podman] MANIFEST
@@ -232,7 +232,7 @@ flatpak build --share=network --filesystem="$OUT" "$BUILD/build" bash -lc "$BUND
 
 ## Repo layout
 
-```
+```sh
 flat2appimage                # the tool (bash), --variant all|squashfs|anylinux
 README.md                    # usage overview, how it works
 scripts/                     # AppManager scripts, copied as reference
@@ -245,7 +245,7 @@ dist/                        # build output (gitignored)
 
 ## Milestones and verification
 
-```
+```sh
 M0 spike (manual, karere)          -> done: assumptions verified
 M1 tool end-to-end (karere)        -> done: one command, both variants + .zsync, smoke tested
 M2 second app (GTK, gjs + meson)   -> done: Flatseal, tool now generic (findings below)

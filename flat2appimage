@@ -180,9 +180,9 @@ case "$MANIFEST" in
 				log "  fetching repo files ($owner/$repo @ $ref)"
 				tmp="$(mktemp -d)"
 				if wget -qO "$tmp/repo.tar.gz" "https://github.com/$owner/$repo/archive/$ref.tar.gz"; then
-					tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
-					top="$(tar -tzf "$tmp/repo.tar.gz" | head -n 1 | cut -d/ -f1)"
-					src="$tmp/$top"
+					mkdir -p "$tmp/repo"
+					tar -xzf "$tmp/repo.tar.gz" -C "$tmp/repo" --strip-components=1
+					src="$tmp/repo"
 					[[ -n "$rdir" ]] && src="$src/$rdir"
 					if [[ -d "$src" ]]; then
 						cp -a "$src/." "$mdir/"

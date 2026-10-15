@@ -33,7 +33,7 @@ cached in `~/.cache/flat2appimage/manifests/<app>/`.
 
 Artifacts land in `dist/`:
 
-```
+```sh
 Karere-4.3.4-x86_64.AppImage           + .zsync   small, needs a GNOME-ish host
 Karere-4.3.4-anylinux-x86_64.AppImage  + .zsync   larger, runs anywhere
 ```
@@ -49,7 +49,7 @@ zsync http://server/path/Karere-4.3.4-x86_64.AppImage.zsync
 Run `./flat2appimage --help` for the full list.
 
 | Option | Purpose |
-|---|---|
+| --- | --- |
 | `--variant all\|squashfs\|anylinux` | build both (default) or one variant |
 | `--arch ARCH` | target architecture (default: container `uname -m`) |
 | `--dist DIR` | output directory (default `./dist`) |
@@ -96,21 +96,3 @@ quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launche
 - Hardcoded `/app` paths in non-gjs launchers (python/shell wrappers) are not rewritten yet.
 - aarch64 is not built locally yet; it is planned for GitHub Actions.
 - Update info for GitHub releases is not wired up yet; local builds use relative zsync URLs.
-
-## Repo layout
-
-```
-flat2appimage                # the tool (bash)
-README.md                    # this file
-docs/flat2appimage-plan.md   # design, decisions, status, findings
-scripts/                     # AppManager build scripts, copied as reference
-dist/                        # build output (gitignored)
-```
-
-Manifests come from a URL (cached under `~/.cache/flat2appimage/manifests/<app>/`, together with the
-rest of the manifest directory) or from a local path. A per-app `flat2appimage.conf` goes next to the
-manifest.
-
-## License
-
-MIT
