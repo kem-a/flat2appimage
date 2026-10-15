@@ -1,0 +1,517 @@
+#!/usr/bin/env bash
+#
+# flat2appimage: build AppImages from a Flathub manifest.
+# Copyright (c) 2026 Arnis K. Licensed under the MIT License.
+#
+# Variants:
+#   squashfs: classic appimagetool, small, relies on host libraries (GNOME baseline)
+#   anylinux: quick-sharun + sharun + uruntime + DwarFS, fully portable
+#
+# Everything runs inside a container (toolbox by default, podman optional).
+#
+set -euo pipefail
+
+# defaults
+VARIANT="all"
+ARCH=""
+DIST=""
+UPDATE_INFO=""
+CONTAINER="flat2appimage"
+ENGINE="auto"
+CONTAINER_IMAGE="registry.fedoraproject.org/fedora:latest"
+KEEP=0
+DEBUG=0
+REFRESH=0
+APP_ID=""
+APP_NAME="${APP_NAME:-}"
+MANIFEST=""
+ORIG_ARGS=("$@")
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/flat2appimage"
+STATIC_TOOLS_DIR="$CACHE_DIR/tools"
+PATCHELF_VERSION="${PATCHELF_VERSION:-0.19.2}"
+PATCHELF_SHA_X86_64="2abdc34fbe949c995a1baa4ec310896a085588a45a99cd0d726851bdfac2a4bb"
+PATCHELF_SHA_AARCH64="ba6850c1a6f4cbdb050e1cc22fa5239159ad31c43606846e49c408d335f594ff"
+QUICK_SHARUN_URL="${QUICK_SHARUN_URL:-https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/main/useful-tools/quick-sharun.sh}"
+QUICK_SHARUN_SHA="${QUICK_SHARUN_SHA:-}"
+UPDATE_REPO="${UPDATE_REPO:-}"
+EXTRA_BINARIES="${EXTRA_BINARIES:-}"
+QS_ENV="${QS_ENV:-}"
+
+log()  { printf '==> %s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<-'EOF'
+	Usage: flat2appimage [OPTIONS] <manifest.yml>
+
+	Build AppImage variants from a Flathub manifest, inside a container.
+
+	Options:
+	  --variant all|squashfs|anylinux  build both (default) or one variant
+	  --arch ARCH                      target architecture (default: container uname -m)
+	  --dist DIR                       output directory (default: ./dist)
+	  --update-info VALUE              override the embedded update information
+	  --app-id ID                      override app id (default: manifest file name)
+	  --container NAME                 container name (default: flat2appimage)
+	  --engine toolbox|podman|auto     container engine (default: auto)
+	  --container-image IMAGE          image for --engine podman
+	  --refresh                        re-download quick-sharun.sh
+	  --keep                           keep AppDirs after a successful build
+	  --debug                          keep AppDirs and enable quick-sharun debug
+	  -h, --help                       show this help
+
+	Per-app overrides: <manifest dir>/flat2appimage.conf (sourced).
+	Recognized variables: APP_NAME, EXTRA_BINARIES, QS_ENV, UPDATE_REPO,
+	                      QUICK_SHARUN_URL, QUICK_SHARUN_SHA.
+	EOF
+}
+
+# ---------------------------------------------------------------- arguments --
+while (( $# )); do
+	case "$1" in
+		--variant)      VARIANT="${2:?--variant needs a value}"; shift 2;;
+		--arch)         ARCH="${2:?--arch needs a value}"; shift 2;;
+		--dist)         DIST="${2:?--dist needs a value}"; shift 2;;
+		--update-info)  UPDATE_INFO="${2:?--update-info needs a value}"; shift 2;;
+		--app-id)       APP_ID="${2:?--app-id needs a value}"; shift 2;;
+		--container)    CONTAINER="${2:?--container needs a value}"; shift 2;;
+		--engine)       ENGINE="${2:?--engine needs a value}"; shift 2;;
+		--container-image) CONTAINER_IMAGE="${2:?--container-image needs a value}"; shift 2;;
+		--refresh)      REFRESH=1; shift;;
+		--keep)         KEEP=1; shift;;
+		--debug)        DEBUG=1; shift;;
+		-h|--help)      usage; exit 0;;
+		-*)             die "unknown option: $1";;
+		*)              MANIFEST="$1"; shift;;
+	esac
+done
+
+case "$VARIANT" in all|squashfs|anylinux) ;; *) die "bad --variant: $VARIANT";; esac
+[[ -n "$MANIFEST" ]] || { usage; exit 1; }
+
+# --------------------------------------------- container bootstrap + re-exec --
+if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
+	case "$ENGINE" in
+		auto)
+			if command -v toolbox >/dev/null 2>&1; then ENGINE=toolbox
+			elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+			else die "need toolbox or podman on the host"; fi
+			;;
+		toolbox) command -v toolbox >/dev/null 2>&1 || die "toolbox not found";;
+		podman)  command -v podman >/dev/null 2>&1 || die "podman not found";;
+		*) die "bad --engine: $ENGINE";;
+	esac
+
+	SELF="$(realpath "$0")"
+	DEPS="flatpak flatpak-builder jq zsync squashfs-tools wget patchelf"
+
+	if [[ "$ENGINE" = toolbox ]]; then
+		if ! toolbox list -c 2>/dev/null | grep -qw "$CONTAINER"; then
+			log "creating toolbox container '$CONTAINER'"
+			toolbox create -c "$CONTAINER" -y
+		fi
+		if ! toolbox run -c "$CONTAINER" sh -c 'command -v flatpak-builder' >/dev/null 2>&1; then
+			log "installing dependencies in '$CONTAINER' (first run)"
+			toolbox run -c "$CONTAINER" sudo dnf -y install $DEPS
+		fi
+		log "entering toolbox container '$CONTAINER'"
+		exec toolbox run -c "$CONTAINER" env F2A_IN_CONTAINER=1 "$SELF" "${ORIG_ARGS[@]}"
+	else
+		if ! podman container exists "$CONTAINER" 2>/dev/null; then
+			log "creating podman container '$CONTAINER' from $CONTAINER_IMAGE"
+			podman create --name "$CONTAINER" --privileged \
+				-v "$HOME:$HOME" -e HOME="$HOME" \
+				"$CONTAINER_IMAGE" sleep infinity >/dev/null
+		fi
+		podman start "$CONTAINER" >/dev/null 2>&1 || true
+		if ! podman exec "$CONTAINER" sh -c 'command -v flatpak-builder' >/dev/null 2>&1; then
+			log "installing dependencies in '$CONTAINER' (first run)"
+			podman exec "$CONTAINER" dnf -y install $DEPS
+		fi
+		log "entering podman container '$CONTAINER'"
+		exec podman exec -e F2A_IN_CONTAINER=1 -w "$PWD" \
+			-v "$PWD:$PWD" "$CONTAINER" "$SELF" "${ORIG_ARGS[@]}"
+	fi
+fi
+
+# ============================================================= in container ==
+missing=0
+for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs; do
+	command -v "$c" >/dev/null 2>&1 || missing=1
+done
+if (( missing )); then
+	SUDO=""
+	[[ "$(id -u)" = 0 ]] || SUDO="sudo"
+	log "installing missing dependencies"
+	$SUDO dnf -y install flatpak flatpak-builder jq zsync squashfs-tools wget patchelf
+fi
+
+[[ -n "$ARCH" ]] || ARCH="$(uname -m)"
+
+MANIFEST="$(realpath "$MANIFEST")"
+[[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+APP_DIR="$(dirname "$MANIFEST")"
+
+if [[ -z "$APP_ID" ]]; then
+	APP_ID="$(basename "$MANIFEST")"
+	APP_ID="${APP_ID%.yml}"
+	APP_ID="${APP_ID%.yaml}"
+	APP_ID="${APP_ID%.json}"
+fi
+
+CONF="$APP_DIR/flat2appimage.conf"
+if [[ -f "$CONF" ]]; then
+	log "loading $CONF"
+	# shellcheck disable=SC1090
+	source "$CONF"
+fi
+
+[[ -n "$DIST" ]] || DIST="$PWD/dist"
+mkdir -p "$DIST"
+DIST="$(realpath "$DIST")"
+BUILD="$APP_DIR/build"
+mkdir -p "$BUILD/logs"
+mkdir -p "$CACHE_DIR"
+
+# isolated flatpak user installation, kept in the cache (not the host install)
+export FLATPAK_USER_DIR="${FLATPAK_USER_DIR:-$CACHE_DIR/flatpak}"
+
+(( DEBUG )) && set -x
+
+# ------------------------------------------------------------------ helpers --
+upinfo_for() { # $1: zsync pattern
+	if [[ -n "$UPDATE_INFO" ]]; then
+		printf '%s' "$UPDATE_INFO"
+	elif [[ -n "$UPDATE_REPO" ]]; then
+		printf 'gh-releases-zsync|%s|%s|latest|%s' \
+			"${UPDATE_REPO%%/*}" "${UPDATE_REPO##*/}" "$1"
+	fi
+}
+
+APPIMAGETOOL=""
+get_appimagetool() {
+	APPIMAGETOOL="$CACHE_DIR/appimagetool-$ARCH"
+	if [[ ! -x "$APPIMAGETOOL" ]]; then
+		log "  downloading appimagetool"
+		wget -qO "$APPIMAGETOOL" \
+			"https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage" \
+			|| die "appimagetool download failed"
+		chmod +x "$APPIMAGETOOL"
+	fi
+}
+
+# static tools that the flatpak SDK lacks (quick-sharun requires patchelf)
+ensure_static_tools() {
+	local sha tarball tmp bin
+	if [[ -x "$STATIC_TOOLS_DIR/patchelf" ]]; then return 0; fi
+	case "$ARCH" in
+		x86_64)  sha="$PATCHELF_SHA_X86_64";;
+		aarch64) sha="$PATCHELF_SHA_AARCH64";;
+		*) die "no static patchelf for $ARCH";;
+	esac
+	mkdir -p "$STATIC_TOOLS_DIR"
+	tarball="$STATIC_TOOLS_DIR/patchelf-$PATCHELF_VERSION-$ARCH.tar.gz"
+	if [[ ! -f "$tarball" ]]; then
+		log "  fetching static patchelf $PATCHELF_VERSION ($ARCH)"
+		wget -qO "$tarball" \
+			"https://github.com/NixOS/patchelf/releases/download/$PATCHELF_VERSION/patchelf-$PATCHELF_VERSION-$ARCH.tar.gz" \
+			|| die "patchelf download failed"
+	fi
+	printf '%s  %s\n' "$sha" "$tarball" | sha256sum -c - >/dev/null || die "patchelf checksum mismatch"
+	tmp="$(mktemp -d)"
+	tar -xf "$tarball" -C "$tmp"
+	bin="$(find "$tmp" -type f -name patchelf -print -quit)"
+	[[ -n "$bin" ]] || die "patchelf binary not found in tarball"
+	install -m755 "$bin" "$STATIC_TOOLS_DIR/patchelf"
+	rm -rf "$tmp"
+}
+
+# translate /app paths to a placeholder root, for use inside generated files
+translate_app_paths() { # $1: value, $2: literal replacement (e.g. '$HERE/usr')
+	printf '%s' "${1//\/app/$2}"
+}
+
+write_apprun() { # $1: appdir
+	local appdir="$1" e var val t
+	{
+		printf '#!/bin/bash\n'
+		printf 'HERE="$(dirname "$(readlink -f "$0")")"\n'
+		printf 'export APPDIR="$HERE"\n'
+		printf 'export PATH="$HERE/usr/bin${PATH:+:$PATH}"\n'
+		printf 'export XDG_DATA_DIRS="$HERE/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"\n'
+		printf 'export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+		if [[ -d "$appdir/usr/share/glib-2.0/schemas" ]]; then
+			printf 'export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"\n'
+		fi
+		for e in "${FINISH_ENV[@]}"; do
+			var="${e%%=*}"
+			val="${e#*=}"
+			t="$(translate_app_paths "$val" '$HERE/usr')"
+			case "$var" in
+				LD_LIBRARY_PATH)
+					printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$t";;
+				PATH)
+					printf 'export PATH="%s${PATH:+:$PATH}"\n' "$t";;
+				*)
+					printf 'export %s="%s"\n' "$var" "$t";;
+			esac
+		done
+		printf 'exec "$HERE/usr/bin/%s" "$@"\n' "$COMMAND"
+	} > "$appdir/AppRun"
+	chmod +x "$appdir/AppRun"
+}
+
+zsync_one() { # $1: file name inside $DIST
+	log "  zsync: $1"
+	( cd "$DIST" && zsyncmake -u "$1" -o "$1.zsync" "$1" )
+}
+
+# meson/gjs launcher scripts hardcode the flatpak prefix "/app"; rewrite it to
+# use $APPDIR (set by the AppImage runtime and by the AppRun wrappers)
+patch_gjs_launchers() { # $1: bin dir, $2: subprefix ('' or '/usr')
+	local dir="$1" sub="$2" f
+	[[ -d "$dir" ]] || return 0
+	for f in "$dir"/*; do
+		[[ -f "$f" ]] || continue
+		head -n 1 "$f" 2>/dev/null | grep -q gjs || continue
+		grep -q '"/app' "$f" 2>/dev/null || continue
+		sed -i "s|\"/app/|GLib.getenv(\"APPDIR\") + \"$sub/|g; s|\"/app\"|GLib.getenv(\"APPDIR\") + \"$sub\"|g" "$f"
+		grep -q 'const GLib' "$f" || sed -i '1a const GLib = imports.gi.GLib;' "$f"
+		log "  rewrote /app prefix in ${f##*/}"
+	done
+}
+
+# ------------------------------------------------------------------ phase 1 --
+log "Phase 1: reading manifest '$APP_ID'"
+flatpak-builder --show-manifest "$MANIFEST" > "$BUILD/manifest.json"
+
+COMMAND="$(jq -r '.command // empty' "$BUILD/manifest.json")"
+[[ -n "$COMMAND" ]] || die "manifest has no 'command'"
+
+VERSION="$(jq -r '[.. | objects | select(.type? == "git") | .tag?] | map(select(. != null)) | first // empty' "$BUILD/manifest.json")"
+VERSION="${VERSION#v}"
+[[ -n "$VERSION" ]] || VERSION="unknown"
+
+FINISH_ENV=()
+while IFS= read -r line; do
+	if [[ -n "$line" ]]; then FINISH_ENV+=("$line"); fi
+done < <(jq -r '.["finish-args"] // [] | .[] | select(startswith("--env=")) | sub("^--env="; "")' "$BUILD/manifest.json")
+
+log "  command=$COMMAND version=$VERSION (finish env: ${#FINISH_ENV[@]})"
+
+# ------------------------------------------------------------------ phase 2 --
+log "Phase 2: flatpak-builder (first run downloads runtime, SDK and sources)"
+flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+# rofiles-fuse needs /dev/fuse, which toolbox containers lack
+flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
+	--state-dir="$BUILD/.flatpak-builder" --repo="$BUILD/repo" \
+	"$BUILD/build" "$MANIFEST" 2>&1 | tee "$BUILD/logs/flatpak-builder.log"
+
+FILES="$BUILD/build/files"
+[[ -d "$FILES" ]] || die "build output missing: $FILES"
+
+# desktop file, name, icon
+APPS="$FILES/share/applications"
+DESKTOP=""
+for cand in "$APPS/$APP_ID.desktop" "$APPS/$COMMAND.desktop"; do
+	if [[ -f "$cand" ]]; then DESKTOP="$cand"; break; fi
+done
+if [[ -z "$DESKTOP" ]]; then
+	DESKTOP="$(find "$APPS" -maxdepth 1 -name '*.desktop' -print -quit 2>/dev/null || true)"
+fi
+[[ -n "$DESKTOP" ]] || die "no desktop file found in $APPS"
+
+if [[ -z "$APP_NAME" ]]; then
+	APP_NAME="$(awk '/^Name=/{sub(/^Name=/,""); print; exit}' "$DESKTOP")"
+fi
+[[ -n "$APP_NAME" ]] || APP_NAME="${APP_ID##*.}"
+
+ICON_NAME="$(awk '/^Icon=/{sub(/^Icon=/,""); print; exit}' "$DESKTOP")"
+ICON=""
+for size in 512x512 256x256 128x128 64x64 48x48 scalable; do
+	for ext in png svg; do
+		cand="$FILES/share/icons/hicolor/$size/apps/$ICON_NAME.$ext"
+		if [[ -f "$cand" ]]; then ICON="$cand"; break 2; fi
+	done
+done
+if [[ -z "$ICON" ]]; then
+	ICON="$(find "$FILES/share/icons" -type f \( -name '*.png' -o -name '*.svg' \) -print -quit 2>/dev/null || true)"
+fi
+if [[ -z "$ICON" ]]; then warn "no icon found, packaging may fail"; fi
+
+NAME_SAFE="$APP_NAME"
+VERSION_SAFE="${VERSION//[^A-Za-z0-9._-]/_}"
+SQUASHFS_NAME="$NAME_SAFE-$VERSION_SAFE-$ARCH.AppImage"
+ANYLINUX_NAME="$NAME_SAFE-$VERSION_SAFE-anylinux-$ARCH.AppImage"
+cp -f "$FILES/manifest.json" "$DIST/$APP_ID.manifest.json" 2>/dev/null || true
+
+# --------------------------------------------------------------- phase 3a ----
+build_squashfs() {
+	log "Phase 3a: squashfs variant"
+	local out="$BUILD/squashfs"
+	local appdir="$out/AppDir" gsdir ext upinfo
+	local tool_args=()
+	rm -rf "$out"
+	mkdir -p "$appdir/usr"
+	cp -a "$FILES/." "$appdir/usr/"
+	rm -f "$appdir/usr/manifest.json"
+	rm -rf "$appdir/usr/lib/debug"
+	patch_gjs_launchers "$appdir/usr/bin" '/usr'
+
+	install -Dm644 "$DESKTOP" "$appdir/$APP_ID.desktop"
+	sed -i -E "s|^Icon=.*|Icon=$APP_ID|" "$appdir/$APP_ID.desktop"
+	if [[ -n "$ICON" ]]; then
+		ext="${ICON##*.}"
+		install -Dm644 "$ICON" "$appdir/$APP_ID.$ext"
+		if [[ "$ext" = png ]]; then
+			cp -f "$appdir/$APP_ID.$ext" "$appdir/.DirIcon"
+		fi
+	fi
+
+	gsdir="$appdir/usr/share/glib-2.0/schemas"
+	if [[ -d "$gsdir" && ! -f "$gsdir/gschemas.compiled" ]] && command -v glib-compile-schemas >/dev/null 2>&1; then
+		glib-compile-schemas "$gsdir" || warn "glib-compile-schemas failed"
+	fi
+
+	write_apprun "$appdir"
+
+	get_appimagetool
+	upinfo="$(upinfo_for "$NAME_SAFE-*-$ARCH.AppImage.zsync")"
+	if [[ -n "$upinfo" ]]; then tool_args=(--updateinformation "$upinfo"); fi
+	log "  running appimagetool"
+	ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "${tool_args[@]}" \
+		"$appdir" "$DIST/$SQUASHFS_NAME" 2>&1 | tee "$BUILD/logs/appimagetool-squashfs.log"
+	[[ -f "$DIST/$SQUASHFS_NAME" ]] || die "squashfs variant was not produced"
+}
+
+# --------------------------------------------------------------- phase 3b ----
+build_anylinux() {
+	log "Phase 3b: anylinux variant"
+	local out="$BUILD/anylinux" qs="$CACHE_DIR/quick-sharun.sh"
+	local desktopsb iconsb upinfo envlines="" e var val t
+	mkdir -p "$out"
+	ensure_static_tools
+
+	if (( REFRESH )) || [[ ! -f "$qs" ]]; then
+		log "  fetching quick-sharun"
+		wget -qO "$qs" "$QUICK_SHARUN_URL" || die "quick-sharun download failed"
+	fi
+	if [[ -n "$QUICK_SHARUN_SHA" ]]; then
+		printf '%s  %s\n' "$QUICK_SHARUN_SHA" "$qs" | sha256sum -c - >/dev/null \
+			|| die "quick-sharun checksum mismatch"
+	else
+		log "  quick-sharun sha256: $(sha256sum "$qs" | cut -d' ' -f1)"
+	fi
+	cp -f "$qs" "$out/quick-sharun.sh"
+
+	# paths as seen inside the flatpak sandbox
+	desktopsb="/app/${DESKTOP#"$FILES/"}"
+	iconsb=""
+	if [[ -n "$ICON" ]]; then iconsb="/app/${ICON#"$FILES/"}"; fi
+	upinfo="$(upinfo_for "$NAME_SAFE-*-anylinux-$ARCH.AppImage.zsync")"
+
+	# finish-args env translated for the AppImage
+	for e in "${FINISH_ENV[@]}"; do
+		var="${e%%=*}"
+		val="${e#*=}"
+		t="$(translate_app_paths "$val" '${SHARUN_DIR}')"
+		if [[ "$var" = LD_LIBRARY_PATH ]]; then
+			envlines+="SHARUN_EXTRA_LIBRARY_PATH=$t"$'\n'
+		else
+			envlines+="$var=$t"$'\n'
+		fi
+	done
+
+	{
+		echo '#!/bin/bash'
+		echo 'set -euo pipefail'
+		echo "OUT=\"$out\""
+		echo 'APPDIR="$OUT/AppDir"'
+		echo 'rm -rf "$APPDIR"'
+		echo 'mkdir -p "$APPDIR"'
+		echo 'cp -a /app/. "$APPDIR/"'
+		echo 'rm -f "$APPDIR/manifest.json"'
+		echo 'rm -rf "$APPDIR/lib/debug"'
+		# meson/gjs launchers hardcode "/app"; rewrite to $APPDIR
+		echo 'for f in "$APPDIR"/bin/*; do'
+		echo '	[[ -f "$f" ]] || continue'
+		echo '	head -n 1 "$f" | grep -q gjs || continue'
+		echo '	grep -q "\"/app" "$f" || continue'
+		echo '	sed -i "s|\"/app/|GLib.getenv(\"APPDIR\") + \"/|g; s|\"/app\"|GLib.getenv(\"APPDIR\")|g" "$f"'
+		echo '	grep -q "const GLib" "$f" || sed -i "1a const GLib = imports.gi.GLib;" "$f"'
+		echo '	echo "  note: rewrote /app prefix in ${f##*/}"'
+		echo 'done'
+		# script launchers bypass sharun's env setup: provide schema dir via a hook
+		cat <<'F2AHOOK'
+mkdir -p "$APPDIR/bin"
+cat > "$APPDIR/bin/zz-f2a-env.hook" <<'HOOKEOF'
+if [ -d "$APPDIR/share/glib-2.0/schemas" ]; then
+	export GSETTINGS_SCHEMA_DIR="$APPDIR/share/glib-2.0/schemas"
+fi
+HOOKEOF
+F2AHOOK
+		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"$COMMAND\""
+		echo "export DESKTOP=\"$desktopsb\""
+		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
+		if [[ -n "$upinfo" ]]; then echo "export UPINFO=\"$upinfo\""; fi
+		if (( DEBUG )); then echo 'export QUICK_SHARUN_DEBUG=1'; fi
+		echo 'export STRACE_MODE="${STRACE_MODE:-0}"'
+		echo "export PATH=\"$STATIC_TOOLS_DIR:\$PATH\""
+		echo 'command -v patchelf >/dev/null || { echo "ERROR: patchelf missing in sandbox"; exit 1; }'
+		# app ships its own locales: quick-sharun's runtime locale cp fails and aborts it
+		echo 'if [[ -d "$APPDIR/share/locale" && -z "${DEPLOY_LOCALE:-}" ]]; then'
+		echo '	export DEPLOY_LOCALE=0'
+		echo '	echo "  note: app ships locales, skipping runtime locale deploy"'
+		echo 'fi'
+		# quick-sharun leaves a session dbus daemon behind, which blocks flatpak build
+		echo 'cleanup_dbus() {'
+		echo '	local p'
+		echo '	for p in /proc/[0-9]*; do'
+		echo '		if [[ "$(cat "$p/comm" 2>/dev/null)" = dbus-daemon ]]; then'
+		echo '			kill "${p#/proc/}" 2>/dev/null || :'
+		echo '		fi'
+		echo '	done'
+		echo '}'
+		echo 'trap cleanup_dbus EXIT'
+		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
+		echo "bash \"\$OUT/quick-sharun.sh\" /app/bin/$COMMAND $EXTRA_BINARIES"
+		if [[ -n "$envlines" ]]; then
+			echo "cat >> \"\$APPDIR/.env\" <<'ENVEOF'"
+			printf '%s' "$envlines"
+			echo 'ENVEOF'
+		fi
+		echo "bash \"\$OUT/quick-sharun.sh\" --make-appimage"
+	} > "$out/bundle.sh"
+
+	local fargs=(--share=network --filesystem="$out" --filesystem="$STATIC_TOOLS_DIR")
+	for e in "${FINISH_ENV[@]}"; do fargs+=(--env="$e"); done
+
+	log "  bundling with quick-sharun (this takes a while)"
+	local status=0
+	flatpak build "${fargs[@]}" "$BUILD/build" bash "$out/bundle.sh" 2>&1 \
+		| tee "$BUILD/logs/anylinux.log" || status=$?
+	if (( status != 0 )); then
+		warn "flatpak build exited with status $status, checking artifacts"
+	fi
+	[[ -f "$out/$ANYLINUX_NAME" ]] || die "anylinux variant was not produced"
+	mv -f "$out/$ANYLINUX_NAME" "$DIST/$ANYLINUX_NAME" || die "failed to move AppImage to $DIST"
+}
+
+# ------------------------------------------------------------------- run it --
+if [[ "$VARIANT" = all || "$VARIANT" = squashfs ]]; then
+	build_squashfs
+	zsync_one "$SQUASHFS_NAME"
+fi
+if [[ "$VARIANT" = all || "$VARIANT" = anylinux ]]; then
+	build_anylinux
+	zsync_one "$ANYLINUX_NAME"
+fi
+
+if (( ! KEEP && ! DEBUG )); then
+	rm -rf "$BUILD/squashfs" "$BUILD/anylinux"
+fi
+
+log "done, artifacts in $DIST"
+ls -lh "$DIST"

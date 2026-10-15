@@ -1,0 +1,13 @@
+AppDir/
+build*/
+dist/
+squashfs-root/
+squashfs-*.img
+*.[Aa]pp[Ii]mage
+*.[Aa]pp[Ii]mage.zsync
+appimagetool
+.vscode/
+.directory
+.c[a-z]*/
+*.log
+.flatpak-builder/
