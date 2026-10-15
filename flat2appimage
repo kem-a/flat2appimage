@@ -44,9 +44,12 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat <<-'EOF'
-	Usage: flat2appimage [OPTIONS] <manifest.yml>
+	Usage: flat2appimage [OPTIONS] <manifest file or URL>
 
 	Build AppImage variants from a Flathub manifest, inside a container.
+	The manifest may be a local path or an http(s) URL (GitHub blob URLs are
+	converted to raw automatically); URL downloads are cached in
+	~/.cache/flat2appimage/manifests/.
 
 	Options:
 	  --variant all|squashfs|anylinux  build both (default) or one variant
@@ -149,6 +152,25 @@ if (( missing )); then
 fi
 
 [[ -n "$ARCH" ]] || ARCH="$(uname -m)"
+
+# the manifest may be a URL; convert GitHub blob URLs to raw and download
+case "$MANIFEST" in
+	http://*|https://*)
+		if [[ "$MANIFEST" = https://github.com/*/blob/* ]]; then
+			rest="${MANIFEST#https://github.com/}"
+			owner="${rest%%/*}"; rest="${rest#*/}"
+			repo="${rest%%/*}"; rest="${rest#*/}"
+			MANIFEST="https://raw.githubusercontent.com/$owner/$repo/${rest#blob/}"
+		fi
+		mname="${MANIFEST%%[?#]*}"; mname="${mname##*/}"
+		[[ -n "$mname" ]] || die "cannot derive file name from: $MANIFEST"
+		mdir="$CACHE_DIR/manifests/${mname%.*}"
+		mkdir -p "$mdir"
+		log "downloading manifest $MANIFEST"
+		wget -qO "$mdir/$mname" "$MANIFEST" || { rm -f "$mdir/$mname"; die "manifest download failed"; }
+		MANIFEST="$mdir/$mname"
+		;;
+esac
 
 MANIFEST="$(realpath "$MANIFEST")"
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"

@@ -15,9 +15,20 @@ Status: working, early. Verified with `io.github.tobagin.karere` (Rust + CEF, ym
 
 ## Quick start
 
+Build straight from Flathub, no local checkout needed:
+
 ```sh
-./flat2appimage io.github.tobagin.karere/io.github.tobagin.karere.yml
+./flat2appimage https://github.com/flathub/io.github.tobagin.karere/blob/master/io.github.tobagin.karere.yml
 ```
+
+A local manifest file works too:
+
+```sh
+./flat2appimage path/to/io.github.tobagin.karere.yml
+```
+
+GitHub `blob` URLs are converted to raw automatically. The manifest is cached in
+`~/.cache/flat2appimage/manifests/<app>/`.
 
 Artifacts land in `dist/`:
 
@@ -51,7 +62,8 @@ Run `./flat2appimage --help` for the full list.
 
 ## Per-app overrides
 
-Optional `flat2appimage.conf` next to the manifest (sourced by the tool):
+Optional `flat2appimage.conf` next to the manifest (sourced by the tool). For URL builds, put it in
+`~/.cache/flat2appimage/manifests/<app>/`:
 
 ```sh
 APP_NAME="MyApp"                           # override the name from the desktop file
@@ -91,12 +103,14 @@ flat2appimage                # the tool (bash)
 README.md                    # this file
 docs/flat2appimage-plan.md   # design, decisions, status, findings
 scripts/                     # AppManager build scripts, copied as reference
-io.github.tobagin.karere/    # example target (yml manifest, Rust + CEF)
-com.github.tchx84.Flatseal/  # example target (JSON manifest, gjs + meson)
+io.github.tobagin.karere/    # optional local test manifest (Rust + CEF)
+com.github.tchx84.Flatseal/  # optional local test manifest (gjs + meson)
 dist/                        # build output (gitignored)
 ```
 
-Each app directory holds the Flathub manifest and an optional `flat2appimage.conf`.
+Manifests normally come from a URL. A local manifest directory can hold the manifest and an
+optional `flat2appimage.conf`; for URL builds the manifest is cached and the conf is looked up in
+`~/.cache/flat2appimage/manifests/<app>/`.
 
 ## License
 
