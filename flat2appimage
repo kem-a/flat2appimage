@@ -22,6 +22,7 @@ CONTAINER_IMAGE="registry.fedoraproject.org/fedora:latest"
 KEEP=0
 DEBUG=0
 REFRESH=0
+CACHE_CMD=""
 APP_ID=""
 APP_NAME="${APP_NAME:-}"
 MANIFEST=""
@@ -64,6 +65,8 @@ usage() {
 	  --refresh                        re-download quick-sharun.sh
 	  --keep                           keep AppDirs after a successful build
 	  --debug                          keep AppDirs and enable quick-sharun debug
+	  --cache                          show cache disk usage, offer to clear it
+	  --clean-cache                    delete the cache (runtimes, builds, downloads)
 	  -h, --help                       show this help
 
 	Per-app overrides: <manifest dir>/flat2appimage.conf (sourced).
@@ -84,6 +87,8 @@ while (( $# )); do
 		--engine)       ENGINE="${2:?--engine needs a value}"; shift 2;;
 		--container-image) CONTAINER_IMAGE="${2:?--container-image needs a value}"; shift 2;;
 		--refresh)      REFRESH=1; shift;;
+		--cache)        CACHE_CMD=show; shift;;
+		--clean-cache)  CACHE_CMD=clean; shift;;
 		--keep)         KEEP=1; shift;;
 		--debug)        DEBUG=1; shift;;
 		-h|--help)      usage; exit 0;;
@@ -93,6 +98,38 @@ while (( $# )); do
 done
 
 case "$VARIANT" in all|squashfs|anylinux) ;; *) die "bad --variant: $VARIANT";; esac
+
+# ------------------------------------------------------------- cache tools --
+if [[ -n "$CACHE_CMD" ]]; then
+	printf 'cache: %s\n' "$CACHE_DIR"
+	if [[ -d "$CACHE_DIR" ]]; then
+		printf '  total: %s\n' "$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)"
+		for d in "$CACHE_DIR"/*/; do
+			[[ -d "$d" ]] || continue
+			printf '  %s/ %s\n' "$(basename "$d")" "$(du -sh "$d" 2>/dev/null | cut -f1)"
+		done
+		for d in "$CACHE_DIR"/manifests/*/; do
+			[[ -d "$d" ]] || continue
+			printf '    %s  %s\n' "$(basename "$d")" "$(du -sh "$d" 2>/dev/null | cut -f1)"
+		done
+		if [[ "$CACHE_CMD" = show ]]; then
+			if [[ -t 0 ]]; then
+				read -r -p 'Clear the whole cache? [y/N] ' answer || answer=""
+				[[ "$answer" = [yY]* ]] && CACHE_CMD=clean
+			else
+				printf '  hint: use --clean-cache to remove it\n'
+			fi
+		fi
+	else
+		printf '  (no cache yet)\n'
+	fi
+	if [[ "$CACHE_CMD" = clean ]]; then
+		rm -rf "$CACHE_DIR"
+		printf 'cache cleared (runtimes and tools re-download on the next build)\n'
+	fi
+	exit 0
+fi
+
 [[ -n "$MANIFEST" ]] || { usage; exit 1; }
 
 # --------------------------------------------- container bootstrap + re-exec --

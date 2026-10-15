@@ -60,6 +60,8 @@ Run `./flat2appimage --help` for the full list.
 | `--container-image IMAGE` | image for `--engine podman` |
 | `--refresh` | re-download `quick-sharun.sh` |
 | `--keep`, `--debug` | keep AppDirs (and enable quick-sharun debug) |
+| `--cache` | show cache disk usage, offer to clear it |
+| `--clean-cache` | delete the cache (runtimes, builds, downloads) |
 
 ## Per-app overrides
 
@@ -88,6 +90,8 @@ quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launche
 - `~/.cache/flat2appimage/`: quick-sharun, static patchelf, and an isolated flatpak user dir with the
   downloaded runtimes/SDKs.
 - The container is reused across builds. `toolbox enter flat2appimage` to look inside.
+- Run `./flat2appimage --cache` for a size breakdown and an interactive offer to clear it, or
+  `./flat2appimage --clean-cache` to delete it directly. Runtimes and tools re-download on the next build.
 
 ## Limitations
 
