@@ -79,10 +79,12 @@ QUICK_SHARUN_URL=... QUICK_SHARUN_SHA=...  # pin or replace quick-sharun
 ## Variants
 
 - squashfs (small): classic AppImage. Uses host libraries, so it targets modern GNOME desktops
-  (GTK4, libadwaita, libnss, libgbm, audio).
+  (GTK4, libadwaita, libnss, libgbm, audio). Runtime libraries missing on the build host (e.g. a
+  newer libxml2) are bundled; this reads the host library cache, so it needs the toolbox engine.
 - anylinux (large): portable. Bundles what the app ships and runs on almost any Linux via sharun.
 
 Quirks handled automatically: yml and JSON manifests; `/app` prefix rewrite in gjs launchers;
+compiled-in `/app/share` paths in binaries (patched to a `/tmp/.XXXX` link made at launch);
 quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launchers.
 
 ## Caches

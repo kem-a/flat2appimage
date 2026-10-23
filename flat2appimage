@@ -179,7 +179,7 @@ fi
 
 # ============================================================= in container ==
 missing=0
-for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs; do
+for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs patchelf; do
 	command -v "$c" >/dev/null 2>&1 || missing=1
 done
 if (( missing )); then
@@ -319,8 +319,8 @@ translate_app_paths() { # $1: value, $2: literal replacement (e.g. '$HERE/usr')
 	printf '%s' "${1//\/app/$2}"
 }
 
-write_apprun() { # $1: appdir
-	local appdir="$1" e var val t
+write_apprun() { # $1: appdir, $2: /tmp link name for patched /app/share (optional)
+	local appdir="$1" link="${2:-}" e var val t
 	{
 		printf '#!/bin/bash\n'
 		printf 'HERE="$(dirname "$(readlink -f "$0")")"\n'
@@ -330,6 +330,9 @@ write_apprun() { # $1: appdir
 		printf 'export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
 		if [[ -d "$appdir/usr/share/glib-2.0/schemas" ]]; then
 			printf 'export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"\n'
+		fi
+		if [[ -n "$link" ]]; then
+			printf '[ -e /tmp/%s ] || ln -sfn "$HERE/usr/share" /tmp/%s\n' "$link" "$link"
 		fi
 		for e in "${FINISH_ENV[@]}"; do
 			var="${e%%=*}"
@@ -366,6 +369,52 @@ patch_gjs_launchers() { # $1: bin dir, $2: subprefix ('' or '/usr')
 		sed -i "s|\"/app/|GLib.getenv(\"APPDIR\") + \"$sub/|g; s|\"/app\"|GLib.getenv(\"APPDIR\") + \"$sub\"|g" "$f"
 		grep -q 'const GLib' "$f" || sed -i '1a const GLib = imports.gi.GLib;' "$f"
 		log "  rewrote /app prefix in ${f##*/}"
+	done
+}
+
+is_elf() { [[ "$(od -An -N4 -tx1 "$1")" = ' 7f 45 4c 46' ]]; }
+
+# compiled-in "/app/share" (meson datadir in Rust/C apps) can't be set at
+# runtime; rewrite it in ELF files to /tmp/<link>, which the launcher symlinks
+patch_app_share() { # $1: dir, $2: link name (5 chars); fails if nothing patched
+	local f n=0
+	while IFS= read -r f; do
+		is_elf "$f" || continue
+		LC_ALL=C sed -i "s|/app/share|/tmp/$2|g" "$f"
+		log "  patched /app/share in ${f#"$1"/}"
+		n=$((n + 1))
+	done < <(grep -rlaF /app/share "$1")
+	(( n ))
+}
+
+# squashfs uses host libraries; copy the ones the host lacks from the runtime
+bundle_missing_libs() { # $1: appdir
+	local appdir="$1" cache=/run/host/etc/ld.so.cache hostlibs ref rtlib f so
+	local queue=()
+	if [[ ! -f "$cache" ]]; then
+		warn "host library cache not visible ($cache), not bundling missing libraries"
+		return 0
+	fi
+	hostlibs="$(ldconfig -p -C "$cache" | awk '{print $1}')"
+	ref="$(jq -r --arg arch "$ARCH" '"\(.runtime)/\($arch)/\(.["runtime-version"])"' "$BUILD/manifest.json")"
+	rtlib="$(flatpak info --user --show-location "$ref")/files/lib/$ARCH-linux-gnu"
+	mkdir -p "$appdir/usr/lib"
+	while IFS= read -r f; do
+		if is_elf "$f"; then queue+=("$f"); fi
+	done < <(find "$appdir/usr" -type f \( -perm -u=x -o -name '*.so*' \))
+	while (( ${#queue[@]} )); do
+		f="${queue[0]}"
+		queue=("${queue[@]:1}")
+		while IFS= read -r so; do
+			if grep -qxF "$so" <<<"$hostlibs" || [[ -e "$appdir/usr/lib/$so" ]]; then continue; fi
+			if [[ -e "$rtlib/$so" ]]; then
+				log "  bundling $so (missing on host)"
+				cp -L "$rtlib/$so" "$appdir/usr/lib/"
+				queue+=("$appdir/usr/lib/$so")
+			else
+				warn "$so missing on host and in runtime"
+			fi
+		done < <(patchelf --print-needed "$f" 2>/dev/null)
 	done
 }
 
@@ -431,13 +480,15 @@ NAME_SAFE="$APP_NAME"
 VERSION_SAFE="${VERSION//[^A-Za-z0-9._-]/_}"
 SQUASHFS_NAME="$NAME_SAFE-$VERSION_SAFE-$ARCH.AppImage"
 ANYLINUX_NAME="$NAME_SAFE-$VERSION_SAFE-anylinux-$ARCH.AppImage"
+# replaces "/app/share" as "/tmp/$SHARE_LINK" (same length), random per build
+SHARE_LINK="$(mktemp -u .XXXX)"
 cp -f "$FILES/manifest.json" "$DIST/$APP_ID.manifest.json" 2>/dev/null || true
 
 # --------------------------------------------------------------- phase 3a ----
 build_squashfs() {
 	log "Phase 3a: squashfs variant"
 	local out="$BUILD/squashfs"
-	local appdir="$out/AppDir" gsdir ext upinfo
+	local appdir="$out/AppDir" gsdir ext upinfo link=""
 	local tool_args=()
 	rm -rf "$out"
 	mkdir -p "$appdir/usr"
@@ -445,6 +496,8 @@ build_squashfs() {
 	rm -f "$appdir/usr/manifest.json"
 	rm -rf "$appdir/usr/lib/debug"
 	patch_gjs_launchers "$appdir/usr/bin" '/usr'
+	bundle_missing_libs "$appdir"
+	if patch_app_share "$appdir/usr" "$SHARE_LINK"; then link="$SHARE_LINK"; fi
 
 	install -Dm644 "$DESKTOP" "$appdir/$APP_ID.desktop"
 	sed -i -E "s|^Icon=.*|Icon=$APP_ID|" "$appdir/$APP_ID.desktop"
@@ -461,7 +514,7 @@ build_squashfs() {
 		glib-compile-schemas "$gsdir" || warn "glib-compile-schemas failed"
 	fi
 
-	write_apprun "$appdir"
+	write_apprun "$appdir" "$link"
 
 	get_appimagetool
 	upinfo="$(upinfo_for "$NAME_SAFE-*-$ARCH.AppImage.zsync")"
@@ -563,6 +616,11 @@ F2AHOOK
 		echo 'trap cleanup_dbus EXIT'
 		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
 		echo "bash \"\$OUT/quick-sharun.sh\" /app/bin/$COMMAND $EXTRA_BINARIES"
+		# compiled-in /app/share: patch it, the hook creates the /tmp link
+		declare -f log is_elf patch_app_share
+		echo "if patch_app_share \"\$APPDIR\" $SHARE_LINK; then"
+		echo "	echo '[ -e /tmp/$SHARE_LINK ] || ln -sfn \"\$APPDIR/share\" /tmp/$SHARE_LINK || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
+		echo 'fi'
 		if [[ -n "$envlines" ]]; then
 			echo "cat >> \"\$APPDIR/.env\" <<'ENVEOF'"
 			printf '%s' "$envlines"
