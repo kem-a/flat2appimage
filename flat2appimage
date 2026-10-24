@@ -319,8 +319,26 @@ translate_app_paths() { # $1: value, $2: literal replacement (e.g. '$HERE/usr')
 	printf '%s' "${1//\/app/$2}"
 }
 
-write_apprun() { # $1: appdir, $2: /tmp link name for patched /app/share (optional)
-	local appdir="$1" link="${2:-}" e var val t
+# Recreate the fallback layout Convey and similar Flatpak-built apps expect
+# when they are not running from "/app": source resources (sql, help) and the
+# build tree (web extensions, plugins, GSettings schema).
+emit_package_paths() { # $1: runtime root expression, e.g. '$HERE/usr'
+	local root="$1"
+	[[ -n "$SOURCE_TMP" && -n "$BUILD_TMP" ]] || return 0
+	printf 'mkdir -p "%s"\n' "$SOURCE_TMP"
+	printf 'for f in "%s/share/%s"/*; do [ -e "$f" ] && ln -sfn "$f" "%s/${f##*/}"; done\n' \
+		"$root" "$COMMAND" "$SOURCE_TMP"
+	printf 'mkdir -p "%s/src/client"\n' "$BUILD_TMP"
+	printf 'for f in "%s/lib/%s/web-extensions"/*; do [ -e "$f" ] && ln -sfn "$f" "%s/src/${f##*/}"; done\n' \
+		"$root" "$COMMAND" "$BUILD_TMP"
+	printf '[ -d "%s/lib/%s/plugins" ] && ln -sfn "%s/lib/%s/plugins" "%s/src/client/plugin"\n' \
+		"$root" "$COMMAND" "$root" "$COMMAND" "$BUILD_TMP"
+	printf '[ -d "%s/share/glib-2.0/schemas" ] && ln -sfn "%s/share/glib-2.0/schemas" "%s/desktop"\n' \
+		"$root" "$root" "$BUILD_TMP"
+}
+
+write_apprun() { # $1: appdir, $2: /tmp share link, $3: /tmp lib link (optional)
+	local appdir="$1" link="${2:-}" liblink="${3:-}" e var val t
 	{
 		printf '#!/bin/bash\n'
 		printf 'HERE="$(dirname "$(readlink -f "$0")")"\n'
@@ -334,6 +352,11 @@ write_apprun() { # $1: appdir, $2: /tmp link name for patched /app/share (option
 		if [[ -n "$link" ]]; then
 			printf '[ -e /tmp/%s ] || ln -sfn "$HERE/usr/share" /tmp/%s\n' "$link" "$link"
 		fi
+		if [[ -n "$liblink" ]]; then
+			printf '[ -e /tmp/%s ] || ln -sfn "$HERE/usr/lib" /tmp/%s\n' "$liblink" "$liblink"
+			printf '[ -e /tmp/%sexec ] || ln -sfn "$HERE/usr/libexec" /tmp/%sexec\n' "$liblink" "$liblink"
+		fi
+		emit_package_paths '$HERE/usr'
 		for e in "${FINISH_ENV[@]}"; do
 			var="${e%%=*}"
 			val="${e#*=}"
@@ -387,10 +410,85 @@ patch_app_share() { # $1: dir, $2: link name (5 chars); fails if nothing patched
 	(( n ))
 }
 
+# compiled-in "/app/lib" paths (folks, EDS, plugins, WebKit's libexec) have
+# the same problem as "/app/share". Rewriting the prefix also turns
+# "/app/libexec" into "/tmp/<link>exec", which the launcher links to libexec.
+patch_app_lib() { # $1: dir, $2: link name (3 chars); fails if nothing patched
+	local f n=0
+	while IFS= read -r f; do
+		is_elf "$f" || continue
+		LC_ALL=C sed -i "s|/app/lib|/tmp/$2|g" "$f"
+		log "  patched /app/lib in ${f#"$1"/}"
+		n=$((n + 1))
+	done < <(grep -rlaF /app/lib "$1")
+	(( n ))
+}
+
+# Apps such as Convey fall back to their Flatpak source/build directory when
+# their executable is not under "/app". Rewrite those paths to a fixed /tmp
+# location that the launcher fills with links into the packaged app.
+patch_build_paths() { # $1: dir, $2: old path, $3: new path
+	local f n=0
+	[[ -n "$2" && "$2" != "$3" ]] || return 1
+	while IFS= read -r f; do
+		is_elf "$f" || continue
+		LC_ALL=C sed -i "s|$2|$3|g" "$f"
+		log "  patched $2 in ${f#"$1"/}"
+		n=$((n + 1))
+	done < <(grep -rlaF "$2" "$1")
+	(( n ))
+}
+
+# flatpak builds bake absolute "/app/..." RPATHs into ELF files (e.g. meson
+# --libdir=lib/convey); make them relative to the file so they work in the
+# AppDir, where the flatpak prefix is no longer mounted
+patch_elf_rpaths() { # $1: root dir (the flatpak prefix in the AppDir), $2: prefix
+	local root="$1" prefix="${2:-/app}" f rp p rel target fdir new n=0
+	local -a parts
+	while IFS= read -r -d '' f; do
+		is_elf "$f" || continue
+		rp="$(patchelf --print-rpath "$f" 2>/dev/null)" || continue
+		[[ -n "$rp" ]] || continue
+		fdir="$(dirname "$f")"
+		new=""
+		IFS=: read -r -a parts <<< "$rp"
+		for p in "${parts[@]}"; do
+			case "$p" in
+				"$prefix"|"$prefix"/*)
+					target="$root${p#"$prefix"}"
+					rel="$(realpath -m --relative-to="$fdir" "$target")"
+					if [[ "$rel" = . ]]; then p='$ORIGIN'; else p="\$ORIGIN/$rel"; fi
+					;;
+			esac
+			new="${new:+$new:}$p"
+		done
+		[[ "$new" != "$rp" ]] || continue
+		if patchelf --set-rpath "$new" "$f"; then
+			log "  rewrote RPATH $rp -> $new in ${f#"$root"/}"
+			n=$((n + 1))
+		else
+			warn "could not rewrite RPATH in ${f#"$root"/}"
+		fi
+	done < <(find "$root" -type f -print0)
+	(( n ))
+}
+
+# directories (other than usr/lib) where an ELF's RPATH/RUNPATH points
+elf_rpath_dirs() { # $1: ELF file
+	local f="$1" fdir p
+	fdir="$(dirname "$f")"
+	while IFS= read -r p; do
+		[[ -n "$p" ]] || continue
+		p="${p//\$ORIGIN/$fdir}"
+		[[ "$p" = /* ]] && printf '%s\n' "$p"
+	done < <(patchelf --print-rpath "$f" 2>/dev/null | tr ':' '\n')
+}
+
 # squashfs uses host libraries; copy the ones the host lacks from the runtime
 bundle_missing_libs() { # $1: appdir
 	local appdir="$1" cache=/run/host/etc/ld.so.cache hostlibs ref rtlib f so
-	local queue=()
+	local dir found queue=()
+	local -a search_dirs
 	if [[ ! -f "$cache" ]]; then
 		warn "host library cache not visible ($cache), not bundling missing libraries"
 		return 0
@@ -405,8 +503,15 @@ bundle_missing_libs() { # $1: appdir
 	while (( ${#queue[@]} )); do
 		f="${queue[0]}"
 		queue=("${queue[@]:1}")
+		search_dirs=("$appdir/usr/lib")
+		while IFS= read -r dir; do search_dirs+=("$dir"); done < <(elf_rpath_dirs "$f")
 		while IFS= read -r so; do
-			if grep -qxF "$so" <<<"$hostlibs" || [[ -e "$appdir/usr/lib/$so" ]]; then continue; fi
+			if grep -qxF "$so" <<<"$hostlibs"; then continue; fi
+			found=0
+			for dir in "${search_dirs[@]}"; do
+				if [[ -e "$dir/$so" ]]; then found=1; break; fi
+			done
+			(( found )) && continue
 			if [[ -e "$rtlib/$so" ]]; then
 				log "  bundling $so (missing on host)"
 				cp -L "$rtlib/$so" "$appdir/usr/lib/"
@@ -482,13 +587,30 @@ SQUASHFS_NAME="$NAME_SAFE-$VERSION_SAFE-$ARCH.AppImage"
 ANYLINUX_NAME="$NAME_SAFE-$VERSION_SAFE-anylinux-$ARCH.AppImage"
 # replaces "/app/share" as "/tmp/$SHARE_LINK" (same length), random per build
 SHARE_LINK="$(mktemp -u .XXXX)"
+# replaces "/app/lib" as "/tmp/$LIB_LINK" (same length)
+LIB_LINK="$(basename "$(mktemp -u /tmp/XXX)")"
+
+# Flatpak-built apps that fall back to their build tree when not installed
+# look under /run/build/<module>. Redirect those fixed paths to a unique /tmp
+# directory that the launcher fills with links into the AppDir.
+APP_MODULE="$(jq -r '.modules[-1].name // empty' "$BUILD/manifest.json" 2>/dev/null || true)"
+[[ -n "$APP_MODULE" ]] || APP_MODULE="$COMMAND"
+SOURCE_ROOT="/run/build/$APP_MODULE"
+BUILD_ROOT="$SOURCE_ROOT/_flatpak_build"
+make_tmp_like() { # $1: desired path length
+	local n=$(($1 - 5))
+	(( n >= 3 )) || return 1
+	mktemp -u "/tmp/$(printf 'X%.0s' $(seq 1 "$n"))"
+}
+SOURCE_TMP="$(make_tmp_like "${#SOURCE_ROOT}" || true)"
+BUILD_TMP="$(make_tmp_like "${#BUILD_ROOT}" || true)"
 cp -f "$FILES/manifest.json" "$DIST/$APP_ID.manifest.json" 2>/dev/null || true
 
 # --------------------------------------------------------------- phase 3a ----
 build_squashfs() {
 	log "Phase 3a: squashfs variant"
 	local out="$BUILD/squashfs"
-	local appdir="$out/AppDir" gsdir ext upinfo link=""
+	local appdir="$out/AppDir" gsdir ext upinfo link="" liblink=""
 	local tool_args=()
 	rm -rf "$out"
 	mkdir -p "$appdir/usr"
@@ -496,8 +618,13 @@ build_squashfs() {
 	rm -f "$appdir/usr/manifest.json"
 	rm -rf "$appdir/usr/lib/debug"
 	patch_gjs_launchers "$appdir/usr/bin" '/usr'
+	patch_elf_rpaths "$appdir/usr" || true
 	bundle_missing_libs "$appdir"
 	if patch_app_share "$appdir/usr" "$SHARE_LINK"; then link="$SHARE_LINK"; fi
+	if patch_app_lib "$appdir/usr" "$LIB_LINK"; then liblink="$LIB_LINK"; fi
+	# Patch the longer build root first: the source root is its prefix.
+	patch_build_paths "$appdir/usr" "$BUILD_ROOT" "$BUILD_TMP" || true
+	patch_build_paths "$appdir/usr" "$SOURCE_ROOT" "$SOURCE_TMP" || true
 
 	install -Dm644 "$DESKTOP" "$appdir/$APP_ID.desktop"
 	sed -i -E "s|^Icon=.*|Icon=$APP_ID|" "$appdir/$APP_ID.desktop"
@@ -514,7 +641,7 @@ build_squashfs() {
 		glib-compile-schemas "$gsdir" || warn "glib-compile-schemas failed"
 	fi
 
-	write_apprun "$appdir" "$link"
+	write_apprun "$appdir" "$link" "$liblink"
 
 	get_appimagetool
 	upinfo="$(upinfo_for "$NAME_SAFE-*-$ARCH.AppImage.zsync")"
@@ -592,6 +719,7 @@ fi
 HOOKEOF
 F2AHOOK
 		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"$COMMAND\""
+		echo "export SOURCE_TMP=\"$SOURCE_TMP\" BUILD_TMP=\"$BUILD_TMP\" COMMAND=\"$COMMAND\" LIB_LINK=\"$LIB_LINK\""
 		echo "export DESKTOP=\"$desktopsb\""
 		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
 		if [[ -n "$upinfo" ]]; then echo "export UPINFO=\"$upinfo\""; fi
@@ -616,11 +744,32 @@ F2AHOOK
 		echo 'trap cleanup_dbus EXIT'
 		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
 		echo "bash \"\$OUT/quick-sharun.sh\" /app/bin/$COMMAND $EXTRA_BINARIES"
-		# compiled-in /app/share: patch it, the hook creates the /tmp link
-		declare -f log is_elf patch_app_share
+		# compiled-in /app/share and /app/lib: patch them, the hook creates links
+		declare -f log is_elf patch_app_share patch_app_lib patch_build_paths emit_package_paths
 		echo "if patch_app_share \"\$APPDIR\" $SHARE_LINK; then"
 		echo "	echo '[ -e /tmp/$SHARE_LINK ] || ln -sfn \"\$APPDIR/share\" /tmp/$SHARE_LINK || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
 		echo 'fi'
+		echo "if patch_app_lib \"\$APPDIR\" $LIB_LINK; then"
+		echo "	echo '[ -e /tmp/$LIB_LINK ] || ln -sfn \"\$APPDIR/lib\" /tmp/$LIB_LINK || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
+		echo "	echo '[ -e /tmp/${LIB_LINK}exec ] || ln -sfn \"\$APPDIR/libexec\" /tmp/${LIB_LINK}exec || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
+		echo 'fi'
+		echo "patch_build_paths \"\$APPDIR\" \"$BUILD_ROOT\" \"$BUILD_TMP\" || true"
+		echo "patch_build_paths \"\$APPDIR\" \"$SOURCE_ROOT\" \"$SOURCE_TMP\" || true"
+		# WebKit's helper executables live in the runtime, not the app payload.
+		# Copy them and give them an RPATH to this AppImage's lib directory.
+		echo 'for d in /usr/libexec/webkitgtk-6.0 /app/libexec/webkitgtk-6.0; do'
+		echo '	if [ -d "$d" ]; then mkdir -p "$APPDIR/libexec"; cp -a "$d" "$APPDIR/libexec/"; break; fi'
+		echo 'done'
+		echo 'if [ -d "$APPDIR/libexec/webkitgtk-6.0" ]; then'
+		echo '	for f in "$APPDIR"/libexec/webkitgtk-6.0/WebKit*Process; do'
+		echo "		[ -e \"\$f\" ] && patchelf --set-rpath \"\\\$ORIGIN/../../$LIB_LINK\" \"\$f\" || :"
+		echo '	done'
+		echo 'fi'
+		echo 'oldlib=$(sed -n "s/^_tmp_lib=//p" "$APPDIR/bin/01-path-mapping-hardcoded.hook" 2>/dev/null | head -1)'
+		echo 'if [ -n "$oldlib" ]; then'
+		echo '	echo "[ -e /tmp/${oldlib}exec ] || ln -sfn \"\$APPDIR/libexec\" /tmp/${oldlib}exec || :" >> "$APPDIR/bin/zz-f2a-env.hook"'
+		echo 'fi'
+		echo "emit_package_paths '\$APPDIR' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
 		if [[ -n "$envlines" ]]; then
 			echo "cat >> \"\$APPDIR/.env\" <<'ENVEOF'"
 			printf '%s' "$envlines"

@@ -82,9 +82,14 @@ QUICK_SHARUN_URL=... QUICK_SHARUN_SHA=...  # pin or replace quick-sharun
   (GTK4, libadwaita, libnss, libgbm, audio). Runtime libraries missing on the build host (e.g. a
   newer libxml2) are bundled; this reads the host library cache, so it needs the toolbox engine.
 - anylinux (large): portable. Bundles what the app ships and runs on almost any Linux via sharun.
+  WebKitGTK apps may still hit their own process-IPC errors there; prefer the squashfs variant on a
+  matching GNOME host.
 
 Quirks handled automatically: yml and JSON manifests; `/app` prefix rewrite in gjs launchers;
-compiled-in `/app/share` paths in binaries (patched to a `/tmp/.XXXX` link made at launch);
+absolute `/app` RPATHs in ELF files rewritten to `$ORIGIN`-relative paths;
+compiled-in `/app/share`, `/app/lib` and `/app/libexec` paths in binaries (patched to `/tmp`
+links made at launch, so Folks/EDS/WebKit find their data);
+Flatpak `/run/build/<module>` fallback paths for apps that run from a build tree;
 quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launchers.
 
 ## Caches
