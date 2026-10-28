@@ -132,6 +132,11 @@ fi
 
 [[ -n "$MANIFEST" ]] || { usage; exit 1; }
 
+case "${MANIFEST%%[?#]*}" in
+	*.json|*.yml|*.yaml) ;;
+	*) die "not a Flatpak manifest (expected .json, .yml or .yaml): $MANIFEST";;
+esac
+
 # --------------------------------------------- container bootstrap + re-exec --
 if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 	case "$ENGINE" in
@@ -146,7 +151,7 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 	esac
 
 	SELF="$(realpath "$0")"
-	DEPS="flatpak flatpak-builder jq zsync squashfs-tools wget patchelf"
+	DEPS="flatpak flatpak-builder jq zsync squashfs-tools wget patchelf git"
 
 	if [[ "$ENGINE" = toolbox ]]; then
 		if ! toolbox list -c 2>/dev/null | grep -qw "$CONTAINER"; then
@@ -179,14 +184,14 @@ fi
 
 # ============================================================= in container ==
 missing=0
-for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs patchelf; do
+for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs patchelf git; do
 	command -v "$c" >/dev/null 2>&1 || missing=1
 done
 if (( missing )); then
 	SUDO=""
 	[[ "$(id -u)" = 0 ]] || SUDO="sudo"
 	log "installing missing dependencies"
-	$SUDO dnf -y install flatpak flatpak-builder jq zsync squashfs-tools wget patchelf
+	$SUDO dnf -y install flatpak flatpak-builder jq zsync squashfs-tools wget patchelf git
 fi
 
 [[ -n "$ARCH" ]] || ARCH="$(uname -m)"
@@ -216,18 +221,22 @@ case "$MANIFEST" in
 				rdir="${rpath%/*}"; [[ "$rdir" = "$rpath" ]] && rdir=""
 				log "  fetching repo files ($owner/$repo @ $ref)"
 				tmp="$(mktemp -d)"
-				if wget -qO "$tmp/repo.tar.gz" "https://github.com/$owner/$repo/archive/$ref.tar.gz"; then
-					mkdir -p "$tmp/repo"
-					tar -xzf "$tmp/repo.tar.gz" -C "$tmp/repo" --strip-components=1
+				# git, not the archive tarball: tarballs omit submodules (shared-modules)
+				if git -c init.defaultBranch=main -C "$tmp" init -q repo \
+					&& git -C "$tmp/repo" remote add origin "https://github.com/$owner/$repo.git" \
+					&& git -C "$tmp/repo" fetch -q --depth 1 origin "$ref" \
+					&& git -C "$tmp/repo" checkout -q FETCH_HEAD \
+					&& git -C "$tmp/repo" submodule -q update --init --recursive --depth 1; then
+					find "$tmp/repo" -name .git -prune -exec rm -rf {} +
 					src="$tmp/repo"
 					[[ -n "$rdir" ]] && src="$src/$rdir"
 					if [[ -d "$src" ]]; then
 						cp -a "$src/." "$mdir/"
 					else
-						warn "directory '$rdir' not found in repo archive, manifest only"
+						warn "directory '$rdir' not found in repo, manifest only"
 					fi
 				else
-					warn "could not fetch repo archive, sibling source files may be missing"
+					warn "could not fetch repo, sibling source files may be missing"
 				fi
 				rm -rf "$tmp"
 				;;
@@ -237,6 +246,11 @@ case "$MANIFEST" in
 esac
 
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+# a bare module or source list (top level is a JSON array or YAML sequence)
+# is only included by the main manifest and cannot be built alone
+if grep -m1 -vE '^[[:space:]]*(#|$)' "$MANIFEST" | grep -qE '^[[:space:]]*(\[|- )'; then
+	die "'$(basename "$MANIFEST")' is a module/source list, not an app manifest; pass the main <app-id>.json/.yml instead"
+fi
 MANIFEST="$(realpath "$MANIFEST")"
 APP_DIR="$(dirname "$MANIFEST")"
 
@@ -529,6 +543,10 @@ flatpak-builder --show-manifest "$MANIFEST" > "$BUILD/manifest.json"
 
 COMMAND="$(jq -r '.command // empty' "$BUILD/manifest.json")"
 [[ -n "$COMMAND" ]] || die "manifest has no 'command'"
+
+# extra-data is downloaded by flatpak at install time, flatpak-builder never fetches it
+jq -e '[.. | objects | select(.type? == "extra-data")] | length == 0' "$BUILD/manifest.json" >/dev/null \
+	|| die "extra-data apps are not supported (the app binary is only fetched at flatpak install time)"
 
 VERSION="$(jq -r '[.. | objects | select(.type? == "git") | .tag?] | map(select(. != null)) | first // empty' "$BUILD/manifest.json")"
 VERSION="${VERSION#v}"
