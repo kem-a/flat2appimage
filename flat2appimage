@@ -668,6 +668,7 @@ build_squashfs() {
 	ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "${tool_args[@]}" \
 		"$appdir" "$DIST/$SQUASHFS_NAME" 2>&1 | tee "$BUILD/logs/appimagetool-squashfs.log"
 	[[ -f "$DIST/$SQUASHFS_NAME" ]] || die "squashfs variant was not produced"
+	chmod a-x "$DIST/$SQUASHFS_NAME"
 }
 
 # --------------------------------------------------------------- phase 3b ----
@@ -808,6 +809,7 @@ F2AHOOK
 	fi
 	[[ -f "$out/$ANYLINUX_NAME" ]] || die "anylinux variant was not produced"
 	mv -f "$out/$ANYLINUX_NAME" "$DIST/$ANYLINUX_NAME" || die "failed to move AppImage to $DIST"
+	chmod a-x "$DIST/$ANYLINUX_NAME"
 }
 
 # ------------------------------------------------------------------- run it --
