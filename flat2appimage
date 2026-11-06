@@ -581,6 +581,9 @@ if [[ -z "$DESKTOP" ]]; then
 fi
 [[ -n "$DESKTOP" ]] || die "no desktop file found in $APPS"
 
+# Both variants use this desktop file; metadata belongs in the main group.
+sed -i "/^X-AppImage-Homepage=/d; /^\[Desktop Entry\]$/a X-AppImage-Homepage=https://flathub.org/en/apps/$APP_ID" "$DESKTOP"
+
 if [[ -z "$APP_NAME" ]]; then
 	APP_NAME="$(awk '/^Name=/{sub(/^Name=/,""); print; exit}' "$DESKTOP")"
 fi
