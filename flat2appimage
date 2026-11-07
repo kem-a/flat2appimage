@@ -649,6 +649,8 @@ build_squashfs() {
 
 	install -Dm644 "$DESKTOP" "$appdir/$APP_ID.desktop"
 	sed -i -E "s|^Icon=.*|Icon=$APP_ID|" "$appdir/$APP_ID.desktop"
+	# anylinux appimagetool writes these; squashfs needs them here.
+	sed -i -E "/^X-AppImage-(Name|Version|Arch)=/d; /^\[Desktop Entry\]$/a X-AppImage-Name=$APP_NAME\nX-AppImage-Version=$VERSION\nX-AppImage-Arch=$ARCH" "$appdir/$APP_ID.desktop"
 	if [[ -n "$ICON" ]]; then
 		ext="${ICON##*.}"
 		install -Dm644 "$ICON" "$appdir/$APP_ID.$ext"
