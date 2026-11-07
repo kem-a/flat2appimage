@@ -742,7 +742,7 @@ if [ -d "$APPDIR/share/glib-2.0/schemas" ]; then
 fi
 HOOKEOF
 F2AHOOK
-		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"$COMMAND\""
+		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"$COMMAND\" VERSION=\"$VERSION\""
 		echo "export SOURCE_TMP=\"$SOURCE_TMP\" BUILD_TMP=\"$BUILD_TMP\" COMMAND=\"$COMMAND\" LIB_LINK=\"$LIB_LINK\""
 		echo "export DESKTOP=\"$desktopsb\""
 		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
