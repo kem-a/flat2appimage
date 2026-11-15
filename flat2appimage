@@ -384,7 +384,9 @@ write_apprun() { # $1: appdir, $2: /tmp share link, $3: /tmp lib link (optional)
 					printf 'export %s="%s"\n' "$var" "$t";;
 			esac
 		done
-		printf 'exec "$HERE/usr/bin/%s" "$@"\n' "$COMMAND"
+		local exe="bin/$COMMAND"
+		if [[ -n "$ZYPAK_TARGET" ]]; then exe="${ZYPAK_TARGET#/app/}"; fi
+		printf 'exec "$HERE/usr/%s" "$@"\n' "$exe"
 	} > "$appdir/AppRun"
 	chmod +x "$appdir/AppRun"
 }
@@ -570,6 +572,17 @@ flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofil
 FILES="$BUILD/build/files"
 [[ -d "$FILES" ]] || die "build output missing: $FILES"
 
+# Chromium/CEF apps start through zypak, which only works inside Flatpak.
+# Run the real binary instead; Chromium then uses its own namespace sandbox.
+ZYPAK_TARGET=""
+if [[ -f "$FILES/bin/$COMMAND" ]] && ! is_elf "$FILES/bin/$COMMAND"; then
+	ZYPAK_TARGET="$(grep -oE 'zypak-wrapper(\.sh)? +/app/[^[:space:]"]+' "$FILES/bin/$COMMAND" | head -1 | awk '{print $2}' || true)"
+fi
+if [[ -n "$ZYPAK_TARGET" ]]; then
+	[[ -f "$FILES/${ZYPAK_TARGET#/app/}" ]] || die "zypak target not found: $ZYPAK_TARGET"
+	log "  zypak launcher detected, using $ZYPAK_TARGET"
+fi
+
 # desktop file, name, icon
 APPS="$FILES/share/applications"
 DESKTOP=""
@@ -681,6 +694,7 @@ build_anylinux() {
 	log "Phase 3b: anylinux variant"
 	local out="$BUILD/anylinux" qs="$CACHE_DIR/quick-sharun.sh"
 	local desktopsb iconsb upinfo envlines="" e var val t
+	local main="${ZYPAK_TARGET:-/app/bin/$COMMAND}"
 	mkdir -p "$out"
 	ensure_static_tools
 
@@ -742,7 +756,7 @@ if [ -d "$APPDIR/share/glib-2.0/schemas" ]; then
 fi
 HOOKEOF
 F2AHOOK
-		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"$COMMAND\" VERSION=\"$VERSION\""
+		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"${main##*/}\" VERSION=\"$VERSION\""
 		echo "export SOURCE_TMP=\"$SOURCE_TMP\" BUILD_TMP=\"$BUILD_TMP\" COMMAND=\"$COMMAND\" LIB_LINK=\"$LIB_LINK\""
 		echo "export DESKTOP=\"$desktopsb\""
 		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
@@ -766,8 +780,13 @@ F2AHOOK
 		echo '	done'
 		echo '}'
 		echo 'trap cleanup_dbus EXIT'
+		if [[ -n "$ZYPAK_TARGET" ]]; then
+			# drop the zypak launcher; nss/softokn are dlopened, so force chromium deploy
+			echo "rm -f \"\$APPDIR/bin/$COMMAND\" \"\$APPDIR\"/bin/zypak-* \"\$APPDIR\"/lib/libzypak-*"
+			echo 'export DEPLOY_CHROMIUM=1'
+		fi
 		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
-		echo "bash \"\$OUT/quick-sharun.sh\" /app/bin/$COMMAND $EXTRA_BINARIES"
+		echo "bash \"\$OUT/quick-sharun.sh\" $main $EXTRA_BINARIES"
 		# compiled-in /app/share and /app/lib: patch them, the hook creates links
 		declare -f log is_elf patch_app_share patch_app_lib patch_build_paths emit_package_paths
 		echo "if patch_app_share \"\$APPDIR\" $SHARE_LINK; then"
@@ -789,7 +808,7 @@ F2AHOOK
 		echo "		[ -e \"\$f\" ] && patchelf --set-rpath \"\\\$ORIGIN/../../$LIB_LINK\" \"\$f\" || :"
 		echo '	done'
 		echo 'fi'
-		echo 'oldlib=$(sed -n "s/^_tmp_lib=//p" "$APPDIR/bin/01-path-mapping-hardcoded.hook" 2>/dev/null | head -1)'
+		echo 'oldlib=$(sed -n "s/^_tmp_lib=//p" "$APPDIR/bin/01-path-mapping-hardcoded.hook" 2>/dev/null | head -1 || :)'
 		echo 'if [ -n "$oldlib" ]; then'
 		echo '	echo "[ -e /tmp/${oldlib}exec ] || ln -sfn \"\$APPDIR/libexec\" /tmp/${oldlib}exec || :" >> "$APPDIR/bin/zz-f2a-env.hook"'
 		echo 'fi'
