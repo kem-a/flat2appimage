@@ -88,9 +88,10 @@ QUICK_SHARUN_URL=... QUICK_SHARUN_SHA=...  # pin or replace quick-sharun
 
 Quirks handled automatically: yml and JSON manifests; `/app` prefix rewrite in gjs launchers;
 absolute `/app` RPATHs in ELF files rewritten to `$ORIGIN`-relative paths;
-compiled-in `/app/share`, `/app/lib` and `/app/libexec` paths in binaries (patched to `/tmp`
-links made at launch, so Folks/EDS/WebKit find their data);
-Flatpak `/run/build/<module>` fallback paths for apps that run from a build tree;
+compiled-in `/app/share`, `/app/lib` and `/app/libexec` paths in binaries, and Flatpak
+`/run/build/<module>` fallback paths for apps that run from a build tree (redirected per process
+by sharun's `path-mapping.so` preload, so Folks/EDS/WebKit find their data; no `/tmp` links, so
+several users can run the same AppImage at once);
 quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launchers;
 Chromium/CEF apps launched through zypak (zypak only works inside Flatpak, so the real binary
 is run instead and Chromium uses its own namespace sandbox).
@@ -126,6 +127,8 @@ Cached git mirrors are reused anyway, so most rebuilds do not fetch at all.
 - squashfs variant assumes a GNOME-ish host, by design.
 - JS apps need `gjs` on the host, in both variants (quick-sharun bundles libraries for ELF binaries only).
 - Hardcoded `/app` paths in non-gjs launchers (python/shell wrappers) are not rewritten yet.
+- Path redirection only covers file access through libc (open, stat, exec, dlopen, ...).
+  The dynamic loader's own RPATH lookups and raw syscalls (e.g. Go binaries) are not redirected.
 - Chromium/CEF apps need unprivileged user namespaces for the Chromium sandbox. Ubuntu 24.04+
   restricts them by default.
 - anylinux: no dconf GIO module is bundled, so GSettings use GLib's keyfile backend

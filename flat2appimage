@@ -34,6 +34,9 @@ STATIC_TOOLS_DIR="$CACHE_DIR/tools"
 PATCHELF_VERSION="${PATCHELF_VERSION:-0.19.2}"
 PATCHELF_SHA_X86_64="2abdc34fbe949c995a1baa4ec310896a085588a45a99cd0d726851bdfac2a4bb"
 PATCHELF_SHA_AARCH64="ba6850c1a6f4cbdb050e1cc22fa5239159ad31c43606846e49c408d335f594ff"
+SHARUN_VERSION="3.7.1"
+SHARUN_SHA_X86_64="457efae5913c6a2390a996c3aeb6af2e543c8f16f12e2acd905a7ea39a7bc094"
+SHARUN_SHA_AARCH64="9262162608824022b9d64c665ab2a8614b8b8017e310fffffa80cf8ed6d210cc"
 QUICK_SHARUN_URL="${QUICK_SHARUN_URL:-https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/main/useful-tools/quick-sharun.sh}"
 QUICK_SHARUN_SHA="${QUICK_SHARUN_SHA:-}"
 UPDATE_REPO="${UPDATE_REPO:-}"
@@ -375,26 +378,52 @@ translate_app_paths() { # $1: value, $2: literal replacement (e.g. '$HERE/usr')
 	printf '%s' "${1//\/app/$2}"
 }
 
-# Recreate the fallback layout Convey and similar Flatpak-built apps expect
-# when they are not running from "/app": source resources (sql, help) and the
-# build tree (web extensions, plugins, GSettings schema).
-emit_package_paths() { # $1: runtime root expression, e.g. '$HERE/usr'
-	local root="$1"
-	[[ -n "$SOURCE_TMP" && -n "$BUILD_TMP" ]] || return 0
-	printf 'mkdir -p "%s"\n' "$SOURCE_TMP"
-	printf 'for f in "%s/share/%s"/*; do [ -e "$f" ] && ln -sfn "$f" "%s/${f##*/}"; done\n' \
-		"$root" "$COMMAND" "$SOURCE_TMP"
-	printf 'mkdir -p "%s/src/client"\n' "$BUILD_TMP"
-	printf 'for f in "%s/lib/%s/web-extensions"/*; do [ -e "$f" ] && ln -sfn "$f" "%s/src/${f##*/}"; done\n' \
-		"$root" "$COMMAND" "$BUILD_TMP"
-	printf '[ -d "%s/lib/%s/plugins" ] && ln -sfn "%s/lib/%s/plugins" "%s/src/client/plugin"\n' \
-		"$root" "$COMMAND" "$root" "$COMMAND" "$BUILD_TMP"
-	printf '[ -d "%s/share/glib-2.0/schemas" ] && ln -sfn "%s/share/glib-2.0/schemas" "%s/desktop"\n' \
-		"$root" "$root" "$BUILD_TMP"
+# sharun's pathmap preload, for the squashfs variant (anylinux gets it from quick-sharun)
+get_path_mapping_lib() { # prints the cached path-mapping.so
+	local sha tarball lib="$STATIC_TOOLS_DIR/path-mapping-$SHARUN_VERSION-$ARCH.so"
+	if [[ ! -f "$lib" ]]; then
+		case "$ARCH" in
+			x86_64)  sha="$SHARUN_SHA_X86_64";;
+			aarch64) sha="$SHARUN_SHA_AARCH64";;
+			*) die "no path-mapping.so for $ARCH";;
+		esac
+		mkdir -p "$STATIC_TOOLS_DIR"
+		tarball="$(mktemp)"
+		log "  fetching path-mapping.so (sharun $SHARUN_VERSION, $ARCH)" >&2
+		wget -qO "$tarball" \
+			"https://github.com/pkgforge-dev/Anylinux-sharun/releases/download/$SHARUN_VERSION/sharun+helper-libs-$ARCH.tar" \
+			|| die "sharun download failed"
+		printf '%s  %s\n' "$sha" "$tarball" | sha256sum -c - >/dev/null || die "sharun checksum mismatch"
+		tar -xOf "$tarball" path-mapping.so > "$lib" || die "path-mapping.so not found in sharun tarball"
+		rm -f "$tarball"
+	fi
+	printf '%s' "$lib"
 }
 
-write_apprun() { # $1: appdir, $2: /tmp share link, $3: /tmp lib link (optional)
-	local appdir="$1" link="${2:-}" liblink="${3:-}" e var val t
+# Compiled-in Flatpak paths, redirected per process by path-mapping.so (pathmap).
+# No /tmp links, so several users can run the same AppImage at once.
+# Also covers the Flatpak build tree that Convey and similar apps fall back to
+# when not run from "/app": sources (sql, help), web extensions, plugins, schemas.
+path_mappings() { # $1: runtime root expression (the flatpak prefix), e.g. '$HERE/usr'
+	local r="$1"
+	printf '%s' "/app/share:$r/share,/app/lib:$r/lib,/app/libexec:$r/libexec"
+	printf ',%s' "$SOURCE_ROOT:$r/share/$COMMAND" \
+		"$BUILD_ROOT/src:$r/lib/$COMMAND/web-extensions" \
+		"$BUILD_ROOT/src/client/plugin:$r/lib/$COMMAND/plugins" \
+		"$BUILD_ROOT/desktop:$r/share/glib-2.0/schemas"
+}
+
+# true if an ELF file under $1 embeds a path that path_mappings redirects
+has_flatpak_paths() { # $1: dir
+	local f
+	while IFS= read -r f; do
+		if is_elf "$f"; then return 0; fi
+	done < <(grep -rlaF -e /app/share -e /app/lib -e "$SOURCE_ROOT" "$1")
+	return 1
+}
+
+write_apprun() { # $1: appdir, $2: path-mapping.so path inside the AppDir (optional)
+	local appdir="$1" pmap="${2:-}" e var val t
 	{
 		printf '#!/bin/bash\n'
 		printf 'HERE="$(dirname "$(readlink -f "$0")")"\n'
@@ -405,14 +434,10 @@ write_apprun() { # $1: appdir, $2: /tmp share link, $3: /tmp lib link (optional)
 		if [[ -d "$appdir/usr/share/glib-2.0/schemas" ]]; then
 			printf 'export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"\n'
 		fi
-		if [[ -n "$link" ]]; then
-			printf '[ -e /tmp/%s ] || ln -sfn "$HERE/usr/share" /tmp/%s\n' "$link" "$link"
+		if [[ -n "$pmap" ]]; then
+			printf 'export PATH_MAPPING="%s"\n' "$(path_mappings '$HERE/usr')"
+			printf 'export LD_PRELOAD="$HERE/%s${LD_PRELOAD:+:$LD_PRELOAD}"\n' "$pmap"
 		fi
-		if [[ -n "$liblink" ]]; then
-			printf '[ -e /tmp/%s ] || ln -sfn "$HERE/usr/lib" /tmp/%s\n' "$liblink" "$liblink"
-			printf '[ -e /tmp/%sexec ] || ln -sfn "$HERE/usr/libexec" /tmp/%sexec\n' "$liblink" "$liblink"
-		fi
-		emit_package_paths '$HERE/usr'
 		for e in "${FINISH_ENV[@]}"; do
 			var="${e%%=*}"
 			val="${e#*=}"
@@ -454,48 +479,6 @@ patch_gjs_launchers() { # $1: bin dir, $2: subprefix ('' or '/usr')
 }
 
 is_elf() { [[ "$(od -An -N4 -tx1 "$1")" = ' 7f 45 4c 46' ]]; }
-
-# compiled-in "/app/share" (meson datadir in Rust/C apps) can't be set at
-# runtime; rewrite it in ELF files to /tmp/<link>, which the launcher symlinks
-patch_app_share() { # $1: dir, $2: link name (5 chars); fails if nothing patched
-	local f n=0
-	while IFS= read -r f; do
-		is_elf "$f" || continue
-		LC_ALL=C sed -i "s|/app/share|/tmp/$2|g" "$f"
-		log "  patched /app/share in ${f#"$1"/}"
-		n=$((n + 1))
-	done < <(grep -rlaF /app/share "$1")
-	(( n ))
-}
-
-# compiled-in "/app/lib" paths (folks, EDS, plugins, WebKit's libexec) have
-# the same problem as "/app/share". Rewriting the prefix also turns
-# "/app/libexec" into "/tmp/<link>exec", which the launcher links to libexec.
-patch_app_lib() { # $1: dir, $2: link name (3 chars); fails if nothing patched
-	local f n=0
-	while IFS= read -r f; do
-		is_elf "$f" || continue
-		LC_ALL=C sed -i "s|/app/lib|/tmp/$2|g" "$f"
-		log "  patched /app/lib in ${f#"$1"/}"
-		n=$((n + 1))
-	done < <(grep -rlaF /app/lib "$1")
-	(( n ))
-}
-
-# Apps such as Convey fall back to their Flatpak source/build directory when
-# their executable is not under "/app". Rewrite those paths to a fixed /tmp
-# location that the launcher fills with links into the packaged app.
-patch_build_paths() { # $1: dir, $2: old path, $3: new path
-	local f n=0
-	[[ -n "$2" && "$2" != "$3" ]] || return 1
-	while IFS= read -r f; do
-		is_elf "$f" || continue
-		LC_ALL=C sed -i "s|$2|$3|g" "$f"
-		log "  patched $2 in ${f#"$1"/}"
-		n=$((n + 1))
-	done < <(grep -rlaF "$2" "$1")
-	(( n ))
-}
 
 # flatpak builds bake absolute "/app/..." RPATHs into ELF files (e.g. meson
 # --libdir=lib/convey); make them relative to the file so they work in the
@@ -667,32 +650,22 @@ NAME_SAFE="$APP_NAME"
 VERSION_SAFE="${VERSION//[^A-Za-z0-9._-]/_}"
 SQUASHFS_NAME="$NAME_SAFE-$VERSION_SAFE-$ARCH.AppImage"
 ANYLINUX_NAME="$NAME_SAFE-$VERSION_SAFE-anylinux-$ARCH.AppImage"
-# replaces "/app/share" as "/tmp/$SHARE_LINK" (same length), random per build
-SHARE_LINK="$(mktemp -u .XXXX)"
 # replaces "/app/lib" as "/tmp/$LIB_LINK" (same length)
 LIB_LINK="$(basename "$(mktemp -u /tmp/XXX)")"
 
 # Flatpak-built apps that fall back to their build tree when not installed
-# look under /run/build/<module>. Redirect those fixed paths to a unique /tmp
-# directory that the launcher fills with links into the AppDir.
+# look under /run/build/<module>; path_mappings redirects it into the AppDir.
 APP_MODULE="$(jq -r '.modules[-1].name // empty' "$BUILD/manifest.json" 2>/dev/null || true)"
 [[ -n "$APP_MODULE" ]] || APP_MODULE="$COMMAND"
 SOURCE_ROOT="/run/build/$APP_MODULE"
 BUILD_ROOT="$SOURCE_ROOT/_flatpak_build"
-make_tmp_like() { # $1: desired path length
-	local n=$(($1 - 5))
-	(( n >= 3 )) || return 1
-	mktemp -u "/tmp/$(printf 'X%.0s' $(seq 1 "$n"))"
-}
-SOURCE_TMP="$(make_tmp_like "${#SOURCE_ROOT}" || true)"
-BUILD_TMP="$(make_tmp_like "${#BUILD_ROOT}" || true)"
 cp -f "$FILES/manifest.json" "$DIST/$APP_ID.manifest.json" 2>/dev/null || true
 
 # --------------------------------------------------------------- phase 3a ----
 build_squashfs() {
 	log "Phase 3a: squashfs variant"
 	local out="$BUILD/squashfs"
-	local appdir="$out/AppDir" gsdir ext upinfo link="" liblink=""
+	local appdir="$out/AppDir" gsdir ext upinfo pmap="" lib
 	local tool_args=()
 	rm -rf "$out"
 	mkdir -p "$appdir/usr"
@@ -702,11 +675,12 @@ build_squashfs() {
 	patch_gjs_launchers "$appdir/usr/bin" '/usr'
 	patch_elf_rpaths "$appdir/usr" || true
 	bundle_missing_libs "$appdir"
-	if patch_app_share "$appdir/usr" "$SHARE_LINK"; then link="$SHARE_LINK"; fi
-	if patch_app_lib "$appdir/usr" "$LIB_LINK"; then liblink="$LIB_LINK"; fi
-	# Patch the longer build root first: the source root is its prefix.
-	patch_build_paths "$appdir/usr" "$BUILD_ROOT" "$BUILD_TMP" || true
-	patch_build_paths "$appdir/usr" "$SOURCE_ROOT" "$SOURCE_TMP" || true
+	if has_flatpak_paths "$appdir/usr"; then
+		lib="$(get_path_mapping_lib)" || exit 1
+		pmap="usr/lib/flat2appimage/path-mapping.so"
+		install -Dm755 "$lib" "$appdir/$pmap"
+		log "  compiled-in Flatpak paths found, preloading path-mapping.so"
+	fi
 
 	install -Dm644 "$DESKTOP" "$appdir/$APP_ID.desktop"
 	sed -i -E "s|^Icon=.*|Icon=$APP_ID|" "$appdir/$APP_ID.desktop"
@@ -725,7 +699,7 @@ build_squashfs() {
 		glib-compile-schemas "$gsdir" || warn "glib-compile-schemas failed"
 	fi
 
-	write_apprun "$appdir" "$link" "$liblink"
+	write_apprun "$appdir" "$pmap"
 
 	get_appimagetool
 	upinfo="$(upinfo_for "$NAME_SAFE-*-$ARCH.AppImage.zsync")"
@@ -805,7 +779,6 @@ fi
 HOOKEOF
 F2AHOOK
 		echo "export APPDIR OUTPATH=\"\$OUT\" OUTNAME=\"$ANYLINUX_NAME\" MAIN_BIN=\"${main##*/}\" VERSION=\"$VERSION\""
-		echo "export SOURCE_TMP=\"$SOURCE_TMP\" BUILD_TMP=\"$BUILD_TMP\" COMMAND=\"$COMMAND\" LIB_LINK=\"$LIB_LINK\""
 		echo "export DESKTOP=\"$desktopsb\""
 		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
 		if [[ -n "$upinfo" ]]; then echo "export UPINFO=\"$upinfo\""; fi
@@ -836,6 +809,8 @@ F2AHOOK
 		# Flatpak keeps Mesa in the GL extension, which quick-sharun does not bundle;
 		# load the host GPU drivers instead (also keeps the AppImage small)
 		echo 'export USE_HOST_DRIVERS=1'
+		# compiled-in Flatpak paths: sharun preloads path-mapping.so when this is set
+		echo "export PATH_MAPPING='$(path_mappings '${SHARUN_DIR}')'"
 		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
 		# quick-sharun before the rename only knows the _EXPERIMENTAL name
 		echo 'export USE_HOST_DRIVERS_EXPERIMENTAL="$USE_HOST_DRIVERS"'
@@ -852,17 +827,23 @@ HOOKEOF
 fi
 F2AGBM
 		echo "bash \"\$OUT/quick-sharun.sh\" $main $EXTRA_BINARIES"
-		# compiled-in /app/share and /app/lib: patch them, the hook creates links
-		declare -f log is_elf patch_app_share patch_app_lib patch_build_paths emit_package_paths
-		echo "if patch_app_share \"\$APPDIR\" $SHARE_LINK; then"
-		echo "	echo '[ -e /tmp/$SHARE_LINK ] || ln -sfn \"\$APPDIR/share\" /tmp/$SHARE_LINK || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
-		echo 'fi'
-		echo "if patch_app_lib \"\$APPDIR\" $LIB_LINK; then"
-		echo "	echo '[ -e /tmp/$LIB_LINK ] || ln -sfn \"\$APPDIR/lib\" /tmp/$LIB_LINK || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
-		echo "	echo '[ -e /tmp/${LIB_LINK}exec ] || ln -sfn \"\$APPDIR/libexec\" /tmp/${LIB_LINK}exec || :' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
-		echo 'fi'
-		echo "patch_build_paths \"\$APPDIR\" \"$BUILD_ROOT\" \"$BUILD_TMP\" || true"
-		echo "patch_build_paths \"\$APPDIR\" \"$SOURCE_ROOT\" \"$SOURCE_TMP\" || true"
+		# quick-sharun patches hardcoded /usr/{bin,lib,share} to /tmp/<random> and
+		# links those in a hook; map them instead, /tmp links clash between users
+		cat <<'F2AQS'
+qs_hook="$APPDIR/bin/01-path-mapping-hardcoded.hook"
+if [ -f "$qs_hook" ]; then
+	qs_map=""
+	n=$(sed -n 's/^_tmp_bin=//p' "$qs_hook" | tr -d '"')
+	if [ -n "$n" ]; then qs_map="$qs_map,/tmp/$n:\${SHARUN_DIR}/bin"; fi
+	n=$(sed -n 's/^_tmp_lib=//p' "$qs_hook" | tr -d '"')
+	if [ -n "$n" ]; then qs_map="$qs_map,/tmp/$n:\${SHARUN_DIR}/lib,/tmp/${n}exec:\${SHARUN_DIR}/libexec"; fi
+	n=$(sed -n 's/^_tmp_share=//p' "$qs_hook" | tr -d '"')
+	if [ -n "$n" ]; then qs_map="$qs_map,/tmp/$n:\${SHARUN_DIR}/share"; fi
+	sed -i "s|^PATH_MAPPING=.*|&$qs_map|" "$APPDIR/.env"
+	rm -f "$qs_hook"
+fi
+grep -q '^PATH_MAPPING=' "$APPDIR/.env" || { echo "ERROR: PATH_MAPPING missing in .env"; exit 1; }
+F2AQS
 		# WebKit's helper executables live in the runtime, not the app payload.
 		# Copy them and give them an RPATH to this AppImage's lib directory.
 		echo 'for d in /usr/libexec/webkitgtk-6.0 /app/libexec/webkitgtk-6.0; do'
@@ -873,11 +854,6 @@ F2AGBM
 		echo "		[ -e \"\$f\" ] && patchelf --set-rpath \"\\\$ORIGIN/../../$LIB_LINK\" \"\$f\" || :"
 		echo '	done'
 		echo 'fi'
-		echo 'oldlib=$(sed -n "s/^_tmp_lib=//p" "$APPDIR/bin/01-path-mapping-hardcoded.hook" 2>/dev/null | head -1 || :)'
-		echo 'if [ -n "$oldlib" ]; then'
-		echo '	echo "[ -e /tmp/${oldlib}exec ] || ln -sfn \"\$APPDIR/libexec\" /tmp/${oldlib}exec || :" >> "$APPDIR/bin/zz-f2a-env.hook"'
-		echo 'fi'
-		echo "emit_package_paths '\$APPDIR' >> \"\$APPDIR/bin/zz-f2a-env.hook\""
 		if [[ -n "$envlines" ]]; then
 			echo "cat >> \"\$APPDIR/.env\" <<'ENVEOF'"
 			printf '%s' "$envlines"
