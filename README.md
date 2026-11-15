@@ -83,7 +83,8 @@ QUICK_SHARUN_URL=... QUICK_SHARUN_SHA=...  # pin or replace quick-sharun
   newer libxml2) are bundled; this reads the host library cache, so it needs the toolbox engine.
 - anylinux (large): portable. Bundles what the app ships and runs on almost any Linux via sharun.
   WebKitGTK apps may still hit their own process-IPC errors there; prefer the squashfs variant on a
-  matching GNOME host.
+  matching GNOME host. GPU drivers are not bundled: the host's Mesa/Vulkan drivers are loaded at
+  runtime (quick-sharun `USE_HOST_DRIVERS`; disable with `QS_ENV="USE_HOST_DRIVERS=0"`).
 
 Quirks handled automatically: yml and JSON manifests; `/app` prefix rewrite in gjs launchers;
 absolute `/app` RPATHs in ELF files rewritten to `$ORIGIN`-relative paths;

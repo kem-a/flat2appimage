@@ -785,7 +785,24 @@ F2AHOOK
 			echo "rm -f \"\$APPDIR/bin/$COMMAND\" \"\$APPDIR\"/bin/zypak-* \"\$APPDIR\"/lib/libzypak-*"
 			echo 'export DEPLOY_CHROMIUM=1'
 		fi
+		# Flatpak keeps Mesa in the GL extension, which quick-sharun does not bundle;
+		# load the host GPU drivers instead (also keeps the AppImage small)
+		echo 'export USE_HOST_DRIVERS=1'
 		if [[ -n "$QS_ENV" ]]; then echo "export $QS_ENV"; fi
+		# quick-sharun before the rename only knows the _EXPERIMENTAL name
+		echo 'export USE_HOST_DRIVERS_EXPERIMENTAL="$USE_HOST_DRIVERS"'
+		# the bundled libgbm looks for its backend in the Flatpak GL extension
+		cat <<'F2AGBM'
+if [ "$USE_HOST_DRIVERS" = 1 ]; then
+	cat >> "$APPDIR/bin/zz-f2a-env.hook" <<'HOOKEOF'
+if [ -z "${GBM_BACKENDS_PATH:-}" ]; then
+	for d in /usr/lib/"$(uname -m)"-linux-gnu/gbm /usr/lib64/gbm /usr/lib/gbm /run/opengl-driver/lib/gbm; do
+		if [ -d "$d" ]; then export GBM_BACKENDS_PATH="$d"; break; fi
+	done
+fi
+HOOKEOF
+fi
+F2AGBM
 		echo "bash \"\$OUT/quick-sharun.sh\" $main $EXTRA_BINARIES"
 		# compiled-in /app/share and /app/lib: patch them, the hook creates links
 		declare -f log is_elf patch_app_share patch_app_lib patch_build_paths emit_package_paths
