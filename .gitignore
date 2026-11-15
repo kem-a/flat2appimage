@@ -12,3 +12,4 @@ appimagetool
 *.log
 docs/
 .flatpak-builder/
+.env

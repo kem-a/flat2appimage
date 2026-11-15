@@ -34,14 +34,14 @@ cached in `~/.cache/flat2appimage/manifests/<app>/`.
 Artifacts land in `dist/`:
 
 ```sh
-Karere-4.3.4-x86_64.AppImage           + .zsync   small, needs a GNOME-ish host
-Karere-4.3.4-anylinux-x86_64.AppImage  + .zsync   larger, runs anywhere
+Karere-4.5.0-x86_64.AppImage           + .zsync   small, needs a GNOME-ish host
+Karere-4.5.0-anylinux-x86_64.AppImage  + .zsync   larger, runs anywhere
 ```
 
 Update an old local copy over zsync:
 
 ```sh
-zsync http://server/path/Karere-4.3.4-x86_64.AppImage.zsync
+zsync http://server/path/Karere-4.5.0-x86_64.AppImage.zsync
 ```
 
 ## Options
@@ -91,12 +91,32 @@ absolute `/app` RPATHs in ELF files rewritten to `$ORIGIN`-relative paths;
 compiled-in `/app/share`, `/app/lib` and `/app/libexec` paths in binaries (patched to `/tmp`
 links made at launch, so Folks/EDS/WebKit find their data);
 Flatpak `/run/build/<module>` fallback paths for apps that run from a build tree;
-quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launchers.
+quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launchers;
+Chromium/CEF apps launched through zypak (zypak only works inside Flatpak, so the real binary
+is run instead and Chromium uses its own namespace sandbox).
+
+## GitHub token
+
+GitHub rate-limits anonymous git fetches (HTTP 429). Put a token in `.env` next to the
+`flat2appimage` script (git-ignored) and it is sent with git fetches from github.com, including
+flatpak-builder's. A public-repo read token is enough.
+
+```sh
+install -m600 /dev/null .env
+$EDITOR .env   # add the line: GITHUB_TOKEN=ghp_...
+```
+
+The `GITHUB_TOKEN` / `GH_TOKEN` env vars (e.g. in CI) and `gh auth token` work too and take
+precedence. Env tokens reach the container through a private temp file, never the command line.
+Cached git mirrors are reused anyway, so most rebuilds do not fetch at all.
 
 ## Caches
 
 - `~/.cache/flat2appimage/`: quick-sharun, static patchelf, and an isolated flatpak user dir with the
   downloaded runtimes/SDKs.
+- `~/.cache/flat2appimage/manifests/<app>/build/.flatpak-builder/`: flatpak-builder state, including
+  git mirrors of the sources. Rebuilds reuse them without fetching (`--disable-updates`); the remote
+  is only contacted when something is missing, e.g. a new commit.
 - The container is reused across builds. `toolbox enter flat2appimage` to look inside.
 - Run `./flat2appimage --cache` for a size breakdown and an interactive offer to clear it, or
   `./flat2appimage --clean-cache` to delete it directly. Runtimes and tools re-download on the next build.
@@ -106,5 +126,9 @@ quick-sharun dbus and locale pitfalls; `GSETTINGS_SCHEMA_DIR` for script launche
 - squashfs variant assumes a GNOME-ish host, by design.
 - JS apps need `gjs` on the host, in both variants (quick-sharun bundles libraries for ELF binaries only).
 - Hardcoded `/app` paths in non-gjs launchers (python/shell wrappers) are not rewritten yet.
+- Chromium/CEF apps need unprivileged user namespaces for the Chromium sandbox. Ubuntu 24.04+
+  restricts them by default.
+- anylinux: no dconf GIO module is bundled, so GSettings use GLib's keyfile backend
+  (`~/.config/glib-2.0/settings/keyfile`), separate from the host's dconf settings.
 - aarch64 is not built locally yet; it is planned for GitHub Actions.
 - Update info for GitHub releases is not wired up yet; local builds use relative zsync URLs.

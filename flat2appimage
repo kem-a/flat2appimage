@@ -29,6 +29,7 @@ MANIFEST=""
 ORIG_ARGS=("$@")
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/flat2appimage"
+ENV_FILE="$(dirname "$(realpath "$0")")/.env"
 STATIC_TOOLS_DIR="$CACHE_DIR/tools"
 PATCHELF_VERSION="${PATCHELF_VERSION:-0.19.2}"
 PATCHELF_SHA_X86_64="2abdc34fbe949c995a1baa4ec310896a085588a45a99cd0d726851bdfac2a4bb"
@@ -72,6 +73,10 @@ usage() {
 	Per-app overrides: <manifest dir>/flat2appimage.conf (sourced).
 	Recognized variables: APP_NAME, EXTRA_BINARIES, QS_ENV, UPDATE_REPO,
 	                      QUICK_SHARUN_URL, QUICK_SHARUN_SHA.
+
+	GitHub token: GITHUB_TOKEN=... in .env next to this script (or the
+	GITHUB_TOKEN/GH_TOKEN env vars, or `gh auth token`) is sent with git
+	fetches from github.com, avoiding HTTP 429 rate limits.
 	EOF
 }
 
@@ -153,6 +158,12 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 	SELF="$(realpath "$0")"
 	DEPS="flatpak flatpak-builder jq zsync squashfs-tools wget patchelf git"
 
+	# GitHub token for git fetches (rate limits); never put on a command line
+	GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+	if [[ -z "$GITHUB_TOKEN" ]] && command -v gh >/dev/null 2>&1; then
+		GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+	fi
+
 	if [[ "$ENGINE" = toolbox ]]; then
 		if ! toolbox list -c 2>/dev/null | grep -qw "$CONTAINER"; then
 			log "creating toolbox container '$CONTAINER'"
@@ -163,7 +174,16 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 			toolbox run -c "$CONTAINER" sudo dnf -y install $DEPS
 		fi
 		log "entering toolbox container '$CONTAINER'"
-		exec toolbox run -c "$CONTAINER" env F2A_IN_CONTAINER=1 "$SELF" "${ORIG_ARGS[@]}"
+		# toolbox drops env vars; hand the token over in a private file instead
+		tokenenv=()
+		if [[ -n "$GITHUB_TOKEN" ]]; then
+			tokdir="${XDG_RUNTIME_DIR:-$CACHE_DIR}"
+			mkdir -p "$tokdir"
+			tokfile="$(umask 077; mktemp "$tokdir/f2a-token.XXXXXX")"
+			printf '%s' "$GITHUB_TOKEN" > "$tokfile"
+			tokenenv=(F2A_TOKEN_FILE="$tokfile")
+		fi
+		exec toolbox run -c "$CONTAINER" env F2A_IN_CONTAINER=1 "${tokenenv[@]}" "$SELF" "${ORIG_ARGS[@]}"
 	else
 		if ! podman container exists "$CONTAINER" 2>/dev/null; then
 			log "creating podman container '$CONTAINER' from $CONTAINER_IMAGE"
@@ -177,12 +197,34 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 			podman exec "$CONTAINER" dnf -y install $DEPS
 		fi
 		log "entering podman container '$CONTAINER'"
-		exec podman exec -e F2A_IN_CONTAINER=1 -w "$PWD" \
+		tokenenv=()
+		if [[ -n "$GITHUB_TOKEN" ]]; then
+			export GITHUB_TOKEN
+			tokenenv=(-e GITHUB_TOKEN) # value comes from the env, not argv
+		fi
+		exec podman exec -e F2A_IN_CONTAINER=1 "${tokenenv[@]}" -w "$PWD" \
 			-v "$PWD:$PWD" "$CONTAINER" "$SELF" "${ORIG_ARGS[@]}"
 	fi
 fi
 
 # ============================================================= in container ==
+if [[ -n "${F2A_TOKEN_FILE:-}" ]]; then
+	GITHUB_TOKEN="$(cat "$F2A_TOKEN_FILE" 2>/dev/null || true)"
+	rm -f "$F2A_TOKEN_FILE"
+	unset F2A_TOKEN_FILE
+fi
+GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+# $HOME is shared with the container, so the file is read here, not passed in
+if [[ -z "$GITHUB_TOKEN" && -f "$ENV_FILE" ]]; then
+	GITHUB_TOKEN="$(sed -nE "s/^(export +)?(GITHUB_TOKEN|GH_TOKEN)=[\"']?([^\"'[:space:]]*)[\"']?[[:space:]]*$/\3/p" "$ENV_FILE" | head -1)"
+fi
+if [[ -n "$GITHUB_TOKEN" ]]; then
+	# every git call (ours and flatpak-builder's) sends it to github.com only
+	export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+	GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+	export GIT_CONFIG_VALUE_0
+	log "using GitHub token for git fetches"
+fi
 missing=0
 for c in flatpak flatpak-builder jq wget zsyncmake mksquashfs patchelf git; do
 	command -v "$c" >/dev/null 2>&1 || missing=1
@@ -565,9 +607,15 @@ log "  command=$COMMAND version=$VERSION (finish env: ${#FINISH_ENV[@]})"
 log "Phase 2: flatpak-builder (first run downloads runtime, SDK and sources)"
 flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 # rofiles-fuse needs /dev/fuse, which toolbox containers lack
-flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
-	--state-dir="$BUILD/.flatpak-builder" --repo="$BUILD/repo" \
-	"$BUILD/build" "$MANIFEST" 2>&1 | tee "$BUILD/logs/flatpak-builder.log"
+fb_args=(--user --force-clean --disable-rofiles-fuse
+	--state-dir="$BUILD/.flatpak-builder" --repo="$BUILD/repo")
+# reuse cached git mirrors (avoids GitHub rate limits); update only if that fails
+flatpak-builder "${fb_args[@]}" --install-deps-from=flathub --download-only --disable-updates \
+	"$BUILD/build" "$MANIFEST" 2>&1 | tee "$BUILD/logs/flatpak-builder.log" \
+	|| flatpak-builder "${fb_args[@]}" --download-only \
+		"$BUILD/build" "$MANIFEST" 2>&1 | tee -a "$BUILD/logs/flatpak-builder.log"
+flatpak-builder "${fb_args[@]}" --disable-download \
+	"$BUILD/build" "$MANIFEST" 2>&1 | tee -a "$BUILD/logs/flatpak-builder.log"
 
 FILES="$BUILD/build/files"
 [[ -d "$FILES" ]] || die "build output missing: $FILES"
