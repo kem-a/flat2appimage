@@ -1,6 +1,7 @@
 # flat2appimage
 
-Build AppImages from a Flathub manifest. One command, two variants, zsync files included.
+Build AppImages from a Flathub manifest or a `.flatpak` bundle. One command, two variants, zsync
+files included.
 Everything runs inside a container (toolbox by default, podman optional).
 
 Status: working, early. Verified with `io.github.tobagin.karere` (Rust + CEF, yml manifest) and
@@ -32,6 +33,15 @@ GitHub `blob` URLs are converted to raw automatically. For GitHub URLs the whole
 directory is fetched (many apps need sibling files like `cargo-sources.json` or patches) and
 cached in `~/.cache/flat2appimage/manifests/<app>/`.
 
+A prebuilt `.flatpak` bundle (local file) is converted without building:
+
+```sh
+./flat2appimage ~/Downloads/fi.taimila.Stocks.flatpak
+```
+
+The app id, command, runtime and env come from the bundle's metadata, the version from its
+AppStream `<release>` (else `unknown`). The runtime and SDK it names are installed from Flathub.
+
 Artifacts land in `dist/`:
 
 ```sh
@@ -55,7 +65,7 @@ Run `./flat2appimage --help` for the full list.
 | `--arch ARCH` | target architecture (default: container `uname -m`) |
 | `--dist DIR` | output directory (default `./dist`) |
 | `--update-info VALUE` | override the embedded AppImage update info |
-| `--app-id ID` | override the app id (default: manifest file name) |
+| `--app-id ID` | override the app id (default: manifest file name, or the bundle's metadata) |
 | `--container NAME` | container name (default: the default toolbox if present, else `flat2appimage`) |
 | `--engine toolbox\|podman\|auto` | container engine (default `auto`) |
 | `--container-image IMAGE` | image for `--engine podman` |
@@ -67,7 +77,8 @@ Run `./flat2appimage --help` for the full list.
 ## Per-app overrides
 
 Optional `flat2appimage.conf` next to the manifest (sourced by the tool). For URL builds, put it in
-`~/.cache/flat2appimage/manifests/<app>/`:
+`~/.cache/flat2appimage/manifests/<app>/`, for bundles in `~/.cache/flat2appimage/bundles/<name>/`
+(`<name>` is the bundle file name without `.flatpak`):
 
 ```sh
 APP_NAME="MyApp"                           # override the name from the desktop file
@@ -119,6 +130,7 @@ Cached git mirrors are reused anyway, so most rebuilds do not fetch at all.
 - `~/.cache/flat2appimage/manifests/<app>/build/.flatpak-builder/`: flatpak-builder state, including
   git mirrors of the sources. Rebuilds reuse them without fetching (`--disable-updates`); the remote
   is only contacted when something is missing, e.g. a new commit.
+- `~/.cache/flat2appimage/bundles/<name>/build/`: the unpacked bundle, recreated on every run.
 - The container is reused across builds. `toolbox enter` (or `toolbox enter flat2appimage`) to look inside.
 - Run `./flat2appimage --cache` for a size breakdown and an interactive offer to clear it, or
   `./flat2appimage --clean-cache` to delete it directly. Runtimes and tools re-download on the next build.
@@ -136,3 +148,5 @@ Cached git mirrors are reused anyway, so most rebuilds do not fetch at all.
   (`~/.config/glib-2.0/settings/keyfile`), separate from the host's dconf settings.
 - aarch64 is not built locally yet; it is planned for GitHub Actions.
 - Update info for GitHub releases is not wired up yet; local builds use relative zsync URLs.
+- Bundles: local files only (no URLs). Translations kept in a separate Locale extension are not
+  part of a bundle, so those apps come out untranslated. No Flathub homepage link is added.
