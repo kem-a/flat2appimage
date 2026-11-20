@@ -11,7 +11,8 @@ Status: working, early. Verified with `io.github.tobagin.karere` (Rust + CEF, ym
 
 - Linux host with `toolbox` (recommended) or `podman`, plus network access on the first run.
 - Disk: a few GB. The GNOME runtime/SDK are ~1.5 GB, big app payloads (CEF) add more.
-- The first run creates the `flat2appimage` container and installs flatpak-builder and friends inside it.
+- The first run reuses the default toolbox container (e.g. `fedora-toolbox-45`) if present, otherwise
+  creates `flat2appimage`, and installs flatpak-builder and friends inside it.
 
 ## Quick start
 
@@ -55,7 +56,7 @@ Run `./flat2appimage --help` for the full list.
 | `--dist DIR` | output directory (default `./dist`) |
 | `--update-info VALUE` | override the embedded AppImage update info |
 | `--app-id ID` | override the app id (default: manifest file name) |
-| `--container NAME` | container name (default `flat2appimage`) |
+| `--container NAME` | container name (default: the default toolbox if present, else `flat2appimage`) |
 | `--engine toolbox\|podman\|auto` | container engine (default `auto`) |
 | `--container-image IMAGE` | image for `--engine podman` |
 | `--refresh` | re-download `quick-sharun.sh` |
@@ -118,7 +119,7 @@ Cached git mirrors are reused anyway, so most rebuilds do not fetch at all.
 - `~/.cache/flat2appimage/manifests/<app>/build/.flatpak-builder/`: flatpak-builder state, including
   git mirrors of the sources. Rebuilds reuse them without fetching (`--disable-updates`); the remote
   is only contacted when something is missing, e.g. a new commit.
-- The container is reused across builds. `toolbox enter flat2appimage` to look inside.
+- The container is reused across builds. `toolbox enter` (or `toolbox enter flat2appimage`) to look inside.
 - Run `./flat2appimage --cache` for a size breakdown and an interactive offer to clear it, or
   `./flat2appimage --clean-cache` to delete it directly. Runtimes and tools re-download on the next build.
 

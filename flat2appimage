@@ -16,7 +16,7 @@ VARIANT="all"
 ARCH=""
 DIST=""
 UPDATE_INFO=""
-CONTAINER="flat2appimage"
+CONTAINER=""
 ENGINE="auto"
 CONTAINER_IMAGE="registry.fedoraproject.org/fedora:latest"
 KEEP=0
@@ -63,7 +63,8 @@ usage() {
 	  --dist DIR                       output directory (default: ./dist)
 	  --update-info VALUE              override the embedded update information
 	  --app-id ID                      override app id (default: manifest file name)
-	  --container NAME                 container name (default: flat2appimage)
+	  --container NAME                 container name (default: the default toolbox
+	                                   if present, else flat2appimage)
 	  --engine toolbox|podman|auto     container engine (default: auto)
 	  --container-image IMAGE          image for --engine podman
 	  --refresh                        re-download quick-sharun.sh
@@ -168,6 +169,11 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 	fi
 
 	if [[ "$ENGINE" = toolbox ]]; then
+		# reuse the default toolbox (e.g. fedora-toolbox-45) unless --container given
+		if [[ -z "$CONTAINER" ]]; then
+			def="$(. /etc/os-release && echo "${ID}-toolbox-${VERSION_ID:-}")"
+			if podman container exists "$def" 2>/dev/null; then CONTAINER="$def"; else CONTAINER=flat2appimage; fi
+		fi
 		if ! toolbox list -c 2>/dev/null | grep -qw "$CONTAINER"; then
 			log "creating toolbox container '$CONTAINER'"
 			toolbox create -c "$CONTAINER" -y
@@ -188,6 +194,7 @@ if [[ "${F2A_IN_CONTAINER:-0}" != 1 ]]; then
 		fi
 		exec toolbox run -c "$CONTAINER" env F2A_IN_CONTAINER=1 "${tokenenv[@]}" "$SELF" "${ORIG_ARGS[@]}"
 	else
+		CONTAINER="${CONTAINER:-flat2appimage}"
 		if ! podman container exists "$CONTAINER" 2>/dev/null; then
 			log "creating podman container '$CONTAINER' from $CONTAINER_IMAGE"
 			podman create --name "$CONTAINER" --privileged \
