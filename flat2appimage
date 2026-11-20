@@ -864,7 +864,8 @@ F2AHOOK
 		if [[ -n "$iconsb" ]]; then echo "export ICON=\"$iconsb\""; fi
 		if [[ -n "$upinfo" ]]; then echo "export UPINFO=\"$upinfo\""; fi
 		if (( DEBUG )); then echo 'export QUICK_SHARUN_DEBUG=1'; fi
-		echo 'export STRACE_MODE="${STRACE_MODE:-0}"'
+		# runs the app briefly to find dlopened libs (.NET/GirCore, ctypes, modules)
+		echo 'export STRACE_MODE="${STRACE_MODE:-1}"'
 		echo "export PATH=\"$STATIC_TOOLS_DIR:\$PATH\""
 		echo 'command -v patchelf >/dev/null || { echo "ERROR: patchelf missing in sandbox"; exit 1; }'
 		# app ships its own locales: quick-sharun's runtime locale cp fails and aborts it

@@ -97,6 +97,9 @@ QUICK_SHARUN_URL=... QUICK_SHARUN_SHA=...  # pin or replace quick-sharun
   WebKitGTK apps may still hit their own process-IPC errors there; prefer the squashfs variant on a
   matching GNOME host. GPU drivers are not bundled: the host's Mesa/Vulkan drivers are loaded at
   runtime (quick-sharun `USE_HOST_DRIVERS`; disable with `QS_ENV="USE_HOST_DRIVERS=0"`).
+  Libraries an app loads at runtime by name are found by running it for a few seconds during the
+  build (quick-sharun `STRACE_MODE`; disable with `QS_ENV="STRACE_MODE=0"`). There is no display
+  then, so only libraries loaded before the first window are caught.
 
 Quirks handled automatically: yml and JSON manifests; `/app` prefix rewrite in gjs launchers;
 absolute `/app` RPATHs in ELF files rewritten to `$ORIGIN`-relative paths;
